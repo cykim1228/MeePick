@@ -1,56 +1,76 @@
-# Welcome to your Expo app 👋
+# 🎲 MeePick
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+집에 있는 보드게임을 한눈에 훑고, **오늘 모인 인원에게 딱 맞는 게임을 골라주는** 태블릿 앱.
 
-## Get started
+노션으로 관리하던 소장 목록(150여 종)을 그대로 가져와서, "오늘 셋이서 30분짜리 가벼운 거"를
+3~4번의 탭으로 찾고, 플레이 기록까지 남긴다.
 
-1. Install dependencies
+## 주요 기능
 
-   ```bash
-   npm install
-   ```
+**추천** — 오늘의 멤버를 고르면 그 인원수에 맞는 게임이 추천순으로 정렬된다.
+시간·난이도·카테고리·테마·메커니즘 필터, 이름 검색, 못 정할 땐 🎲 룰렛.
+사놓고 안 하던 게임(0회)이 위로 올라오는 방치도 점수가 추천의 핵심.
 
-2. Start the app
+**플레이 기록** — 게임 시작 → 게임중 상태(경과 타이머) → 라운드별 우승자·개인 점수·메모 →
+종료. 공동 우승과 협동 게임(승리/패배)을 지원한다. 선 뽑기 팝업과 턴 타이머 내장.
 
-   ```bash
-   npx expo start
-   ```
+**기록·통계** — 날짜별 플레이 이력(편집·삭제 가능), 명예의 전당(우승 순위·연승 🔥·승률),
+개인 최고 점수, 월별 플레이 통계와 월간 리포트, 게임별 전적.
 
-In the output, you'll find options to open the app in a
+**관리** — 게임 추가·수정·삭제, 위시리스트, 룰 영상(유튜브 링크), 모임 마무리 리캡.
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+## 스택
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+- **Expo SDK 57** (React Native + React Native Web) — 웹·안드로이드 한 코드베이스
+- **expo-router** — 파일 기반 라우팅 (`src/app/`)
+- **Supabase** — Postgres + RLS + Storage(표지 이미지)
+- 데이터 원본: **노션 데이터베이스** (CSV 내보내기 → 제목 기준 upsert 동기화)
 
-## Get a fresh project
-
-When you're ready, run:
+## 시작하기
 
 ```bash
-npm run reset-project
+npm install
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+1. Supabase 프로젝트 생성과 스키마 적용: [SUPABASE_SETUP.md](SUPABASE_SETUP.md)
+2. `.env` 작성 (`.env.example` 참고 — 공개 값 2개면 앱이 돈다)
+3. 실행:
 
-### Other setup steps
+```bash
+npm run web
+```
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
+## 데이터 동기화
 
-## Learn more
+노션에서 내보낸 zip을 `_workspace/00_input/`에 두고:
 
-To learn more about developing your project with Expo, look at the following resources:
+```bash
+node scripts/import-notion.mjs --apply   # 목록을 DB에 동기화 (제목 기준 upsert)
+node scripts/upload-images.mjs           # 표지 이미지 리사이즈 후 Storage 업로드
+```
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+플레이 기록·업로드된 표지·앱에서 추가한 게임은 재동기화해도 보존된다.
 
-## Join the community
+## 배포 (Synology NAS)
 
-Join our community of developers creating universal apps.
+정적 빌드를 NAS의 Docker(nginx)로 서빙한다. PC를 꺼도 태블릿에서 항상 열린다.
+전체 절차와 Supabase 킵얼라이브 설정: [deploy/README.md](deploy/README.md)
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+## 폴더 구조
+
+```
+src/
+  app/            화면 (expo-router — 파일 경로가 곧 URL)
+  components/     공용 컴포넌트 (카드·시트·모달·타이머…)
+  features/
+    games/        게임 조회·매퍼·추천 점수·필터
+    plays/        멤버·세션·플레이 기록·통계
+  constants/      디자인 토큰 (팔레트·타이포·간격)
+  hooks/          공용 훅 (브레이크포인트·그리드·타이머)
+  lib/            Supabase 클라이언트·DB 타입·날짜 유틸
+supabase/         마이그레이션 + 시드 (자동 생성)
+scripts/          노션 임포트·이미지 업로드
+deploy/           NAS 배포 구성 (Docker)
+```
+
+자세한 개발 규약은 [CLAUDE.md](CLAUDE.md) 참고.

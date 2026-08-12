@@ -1,0 +1,467 @@
+-- 자동 생성 파일. `node scripts/import-notion.mjs`로 다시 만든다.
+-- Supabase 대시보드 → SQL Editor에 이 파일 전체를 붙여넣고 Run 하면 스키마와 데이터가 한 번에 들어간다.
+
+-- ══ migrations/20260810120000_create_games.sql ══
+-- MeePick — 집 보드게임 소장 목록
+-- 출처: 노션 "보드게임 리스트" CSV (156종)
+-- 인원은 min/max가 아니라 집합으로 보존한다. 노션이 가능/추천/베스트 3단계로 관리하고 있어
+-- min/max로 압축하면 "4인 가능하지만 5인이 베스트" 같은 정보가 사라진다.
+
+create table if not exists public.games (
+  id                 uuid primary key default gen_random_uuid(),
+
+  -- 식별
+  title_ko           text not null,
+  title_en           text,
+
+  -- 소장 여부. 노션 '상태' = 소장/미소장
+  owned              boolean not null default true,
+
+  -- 인원 (집합). '10인+'는 10으로 저장하고 supports_10_plus로 상한 없음을 표현한다.
+  -- 그냥 10으로만 두면 12명일 때 후보에서 사라진다.
+  player_counts      integer[] not null default '{}',
+  recommended_counts integer[] not null default '{}',
+  best_count         integer,
+  supports_10_plus   boolean not null default false,
+
+  -- 플레이타임(분). 노션은 '30–45' 같은 범위 문자열이 섞여 있어 분리해 저장한다.
+  min_playtime       integer,
+  max_playtime       integer,
+
+  -- 난이도 1.00 ~ 5.00 (노션 실측 범위 1.0 ~ 4.26)
+  weight             numeric(3,2),
+
+  -- 분류
+  categories         text[] not null default '{}',
+  themes             text[] not null default '{}',
+  mechanics          text[] not null default '{}',
+
+  -- 부가 정보
+  year_published     integer,
+  image_file         text,
+  description        text,
+  notes              text,
+
+  -- 노션에 값이 없어 채워 넣은 항목 표시. 어떤 필드가 추정인지 함께 남겨
+  -- 사용자가 나중에 직접 정정할 수 있게 한다.
+  is_estimated       boolean not null default false,
+  estimated_fields   text[] not null default '{}',
+
+  -- 노션에 없는 필드. "안 하던 게임 발굴"이 이 앱 추천의 핵심 가치이므로 앱이 기록한다.
+  last_played_at     date,
+
+  created_at         timestamptz not null default now(),
+
+  constraint games_playtime_order check (
+    min_playtime is null or max_playtime is null or max_playtime >= min_playtime
+  ),
+  constraint games_weight_range check (
+    weight is null or (weight >= 1.0 and weight <= 5.0)
+  )
+);
+
+-- 인원수가 1차 필터이므로 배열 포함 검색이 빨라야 한다.
+create index if not exists games_player_counts_idx on public.games using gin (player_counts);
+create index if not exists games_categories_idx    on public.games using gin (categories);
+create index if not exists games_themes_idx        on public.games using gin (themes);
+create index if not exists games_owned_idx         on public.games (owned);
+
+-- ── RLS ────────────────────────────────────────────────────────────────────
+-- anon 키는 앱 번들에 포함되므로 읽기만 허용한다. 쓰기는 아래 RPC로만 열어
+-- "플레이 기록" 외의 임의 수정이 불가능하게 한다.
+
+alter table public.games enable row level security;
+
+drop policy if exists games_public_read on public.games;
+create policy games_public_read on public.games
+  for select using (true);
+
+-- ── 플레이 기록 ────────────────────────────────────────────────────────────
+-- 방치도 점수가 추천의 핵심이라 last_played_at 갱신 경로가 반드시 있어야 한다.
+-- 테이블 UPDATE 정책을 열지 않고 이 함수만 노출한다.
+
+create or replace function public.mark_played(p_game_id uuid, p_played_on date default current_date)
+returns public.games
+language sql
+security definer
+set search_path = public
+as $$
+  update public.games
+     set last_played_at = p_played_on
+   where id = p_game_id
+  returning *;
+$$;
+
+revoke all on function public.mark_played(uuid, date) from public;
+grant execute on function public.mark_played(uuid, date) to anon, authenticated;
+
+
+-- ══ migrations/20260810130000_writable_and_images.sql ══
+-- MeePick — 앱에서 게임을 추가·수정할 수 있게 하고, 표지 이미지 저장소를 만든다.
+
+-- ── 1. 제목을 자연 키로 ────────────────────────────────────────────────────
+-- 노션을 다시 내보내 임포트할 때 truncate 대신 upsert를 쓰기 위해 필요하다.
+-- truncate 방식은 앱에서 추가한 게임과 플레이 기록(last_played_at)을 매번 날린다.
+-- setup_all.sql을 다시 붙여넣어도 깨지지 않도록 존재 여부를 확인하고 추가한다.
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint where conname = 'games_title_ko_unique'
+  ) then
+    alter table public.games add constraint games_title_ko_unique unique (title_ko);
+  end if;
+end $$;
+
+-- ── 2. 쓰기 개방 ───────────────────────────────────────────────────────────
+-- 집에서 쓰는 앱이라 로그인을 두지 않는다. 대신 anon 키로 쓰기가 가능해진다는 뜻이고,
+-- 이는 보안 경계가 아니다 — URL과 publishable 키를 아는 사람은 누구나 수정할 수 있다.
+-- 앱을 외부에 배포하게 되면 Supabase Auth를 붙이고 아래 정책을 authenticated로 좁혀야 한다.
+drop policy if exists games_anon_insert on public.games;
+create policy games_anon_insert on public.games
+  for insert with check (true);
+
+drop policy if exists games_anon_update on public.games;
+create policy games_anon_update on public.games
+  for update using (true) with check (true);
+
+drop policy if exists games_anon_delete on public.games;
+create policy games_anon_delete on public.games
+  for delete using (true);
+
+-- ── 3. 저장소 경로는 별도 칼럼 ─────────────────────────────────────────────
+-- image_file은 노션 원본 파일명(로컬 파일 매칭용)이고, image_path는 업로드된 객체 키다.
+-- 한 칼럼에 두면 노션을 재임포트할 때 업로드 경로가 원본 파일명으로 덮어써진다.
+alter table public.games
+  add column if not exists image_path text;
+
+-- ── 4. 표지 이미지 저장소 ──────────────────────────────────────────────────
+-- 공개 버킷으로 둔다. 표지 이미지에 비밀이랄 게 없고, 공개면 CDN 캐시를 타서
+-- 태블릿에서 목록을 스크롤할 때 매번 인증 요청을 하지 않는다.
+insert into storage.buckets (id, name, public)
+values ('game-images', 'game-images', true)
+on conflict (id) do nothing;
+
+-- 업로드는 로컬 스크립트가 secret 키로 수행한다(RLS 우회). 앱은 읽기만 한다.
+drop policy if exists game_images_public_read on storage.objects;
+create policy game_images_public_read on storage.objects
+  for select using (bucket_id = 'game-images');
+
+
+-- ══ migrations/20260811090000_members_and_plays.sql ══
+-- MeePick — 오늘의 멤버와 플레이 기록
+-- 흐름: 오늘의 멤버 선택 → 게임 시작(게임중) → 라운드별 우승자/협동 결과 → 메모와 함께 종료.
+
+create table if not exists public.members (
+  id uuid primary key default gen_random_uuid(),
+  name text not null unique,
+  created_at timestamptz not null default now()
+);
+
+-- 한 판의 플레이. ended_at이 null이면 지금 게임중이라는 뜻이다.
+create table if not exists public.plays (
+  id uuid primary key default gen_random_uuid(),
+  game_id uuid not null references public.games (id) on delete cascade,
+  member_ids uuid[] not null default '{}',
+  -- 라운드 기록: [{ "winnerIds": [uuid, ...], "coop": "win" | "loss" | null }, ...]
+  -- 협동 승리는 전원이 winnerIds에 들어가고, 협동 패배는 winnerIds가 빈다.
+  -- 별도 테이블이 아니라 jsonb인 이유: 라운드는 항상 자기 플레이와 함께만 읽히고 단독 조회가 없다.
+  rounds jsonb not null default '[]'::jsonb,
+  memo text,
+  started_at timestamptz not null default now(),
+  ended_at timestamptz
+);
+
+create index if not exists plays_game_idx on public.plays (game_id);
+create index if not exists plays_active_idx on public.plays (started_at) where ended_at is null;
+
+-- 동시에 진행 중인 플레이는 한 판뿐이다. 클라이언트 가드만으로는 탭 두 개/기기 두 대에서
+-- 활성 플레이가 두 개 생기고, 하나를 종료하면 남은 좀비가 '게임중'으로 되살아난다.
+create unique index if not exists plays_one_active_idx
+  on public.plays ((ended_at is null))
+  where ended_at is null;
+
+alter table public.members enable row level security;
+alter table public.plays enable row level security;
+
+-- games와 같은 이유로 anon에 전부 연다(집용, 로그인 없음). 보안 경계가 아니다 — CLAUDE.md 참조.
+drop policy if exists members_anon_all on public.members;
+create policy members_anon_all on public.members
+  for all using (true) with check (true);
+
+drop policy if exists plays_anon_all on public.plays;
+create policy plays_anon_all on public.plays
+  for all using (true) with check (true);
+
+-- 게임 종료. 플레이를 닫으면서 games.last_played_at 갱신까지 한 트랜잭션으로 처리한다 —
+-- 두 요청으로 나누면 하나만 성공했을 때 방치도 점수가 실제와 어긋난다.
+-- 날짜는 클라이언트가 로컬 기준으로 보낸다. 서버 current_date는 UTC라 KST 새벽에 하루 어긋난다.
+create or replace function public.end_play(
+  p_play_id uuid,
+  p_memo text default null,
+  p_played_on date default current_date
+)
+returns public.plays
+language sql
+security definer
+set search_path = public
+as $$
+  with ended as (
+    update public.plays
+       set ended_at = now(),
+           memo = coalesce(p_memo, memo)
+     where id = p_play_id
+       and ended_at is null
+    returning *
+  ),
+  touch as (
+    update public.games g
+       set last_played_at = p_played_on
+      from ended e
+     where g.id = e.game_id
+  )
+  select * from ended;
+$$;
+
+revoke all on function public.end_play(uuid, text, date) from public;
+grant execute on function public.end_play(uuid, text, date) to anon, authenticated;
+
+
+-- ══ migrations/20260811210000_log_play.sql ══
+-- MeePick — 빠른 기록('오늘 이거 했어요')도 plays 행으로 남긴다.
+-- 플레이 횟수(N회)의 근거가 plays 테이블이라, 날짜만 갱신하면 횟수에서 빠진다.
+-- 세션 없이 뒤늦게 기록하는 경우라 라운드는 비고 멤버는 있으면 담는다.
+
+create or replace function public.log_play(
+  p_game_id uuid,
+  p_member_ids uuid[] default '{}',
+  p_played_on date default current_date
+)
+returns public.plays
+language sql
+security definer
+set search_path = public
+as $$
+  with created as (
+    insert into public.plays (game_id, member_ids, rounds, started_at, ended_at)
+    values (p_game_id, p_member_ids, '[]'::jsonb, now(), now())
+    returning *
+  ),
+  touch as (
+    update public.games g
+       set last_played_at = p_played_on
+      from created c
+     where g.id = c.game_id
+  )
+  select * from created;
+$$;
+
+revoke all on function public.log_play(uuid, uuid[], date) from public;
+grant execute on function public.log_play(uuid, uuid[], date) to anon, authenticated;
+
+
+-- ══ migrations/20260812010000_play_scores.sql ══
+-- MeePick — 개인 점수.
+-- 판 단위로 { member_id: 점수 } 를 남긴다. 게임별 최고 기록과 개인 점수 순위의 근거.
+-- 라운드별 메모는 rounds jsonb 항목({winnerIds, coop, memo})에 들어가므로 스키마 변경이 없다.
+
+alter table public.plays
+  add column if not exists scores jsonb not null default '{}'::jsonb;
+
+
+-- ══ migrations/20260812120000_rule_video.sql ══
+-- MeePick — 룰 설명 영상 (유튜브 링크).
+-- 영상 파일을 직접 올리지 않는 이유: 룰 영상 150개면 수십 GB로 무료 저장소(1GB)를 즉시 넘고,
+-- 시청 트래픽도 월 한도를 소모한다. 유튜브에 이미 있는 영상을 링크로 연결한다.
+
+alter table public.games
+  add column if not exists rule_video_url text;
+
+
+-- ══ seed.sql ══
+-- 자동 생성 파일. 직접 수정하지 말고 `node scripts/import-notion.mjs`로 다시 만든다.
+-- 출처: _workspace/00_input/notion/보드게임 리스트 1b53d1a7d2dc80cc9d6de91dbd2aedb5.csv
+-- 게임 153종 (소장 149 / 미소장 4)
+--
+-- 제목 기준 upsert다. 여러 번 실행해도 안전하며,
+-- 플레이 기록(last_played_at)·표지 경로(image_path)·앱에서 추가한 게임은 보존된다.
+
+insert into public.games (
+  title_ko, title_en, owned,
+  player_counts, recommended_counts, best_count, supports_10_plus,
+  min_playtime, max_playtime, weight,
+  categories, themes, mechanics,
+  year_published, image_file, rule_video_url, description,
+  is_estimated, estimated_fields
+) values
+  ('5초 준다 !', '5 Second Rule', true, '{3,4,5,6}', '{3}', 5, false, 30, 30, 1.1, ARRAY['파티']::text[], ARRAY['상식','카드 게임','파티 게임']::text[], ARRAY['실시간 (Real-Time)','액션 타이머 (Action Timer)']::text[], 2010, '1575036459-310817_N_210x210_100_5_.png', 'https://youtu.be/ijXDHcSgn2g?si=1RqinRDVrP4NYdwM', null, false, '{}'::text[]),
+  ('가짜 예술가 뉴욕에 가다', 'A Fake Artist Goes to New York', true, '{5,6,7,8,9,10}', '{5}', 6, true, 20, 20, 1.1, ARRAY['파티']::text[], ARRAY['디덕션 (추론)','블러핑','파티 게임']::text[], ARRAY['비공개 역할 (Hidden Roles)','선 그리기 (Line Drawing)','표적 단서 (Targeted Clues)']::text[], 2011, '1680631272137424_lg_N_200x200_100_5_.jpg', 'https://youtu.be/qsQYWi6ox6o?si=l15RfVd2h25sE0o-', null, false, '{}'::text[]),
+  ('간장 공장 공장장', 'Mr.Kang from a Soy Sauce Factory', true, '{2,3,4,5,6}', '{6}', 5, false, 15, 15, 1, ARRAY['파티']::text[], ARRAY['덱스터리티 (손재주)','카드 게임','파티 게임']::text[], ARRAY['실시간 (Real-Time)','이벤트 (events)']::text[], 2024, 'image.png', 'https://youtu.be/6K9q-bBcFT0?si=_IV66ygN0MwQ6ACs', null, false, '{}'::text[]),
+  ('갱스터스 딜레마', 'Gangster''s Dilemma', true, '{3,4,5,6,7}', '{4}', 5, false, 30, 45, 1.83, ARRAY['패밀리']::text[], ARRAY['마피아','블러핑','카드 게임']::text[], ARRAY['동시 액션 선택 (Simultaneous Action Selection)','플레이어별 특수능력 (Variable Player Powers)']::text[], 2020, 'image 1.png', 'https://youtu.be/3UoDsXCbl3U?si=8yfkCShT9d6bKQ9U', null, false, '{}'::text[]),
+  ('겟 빗', 'Get Bit !', true, '{2,3,4,5,6,7}', '{4}', 6, false, 10, 20, 1.12, ARRAY['패밀리']::text[], ARRAY['동물','블러핑','카드 게임','파티 게임']::text[], ARRAY['동시 액션 선택 (Simultaneous Action Selection)','레이스 (Race)','상대적 움직임 (Relative Movement)','플레이어 제거 (Player Elimination)','핸드 관리 (Hand Management)']::text[], 2007, 'image 2.png', 'https://youtu.be/PVLk5JAlCZ8?si=TdGGFqOocx7KcDLq', null, false, '{}'::text[]),
+  ('미스터리 파티 : 구두룡 저택의 살인', 'The Murder at Cthulhu Manor', true, '{7,8,9}', '{9}', 9, false, 180, 180, 2, ARRAY['미스터리']::text[], ARRAY['디덕션 (추론)','살인 / 미스터리']::text[], ARRAY['롤플레잉 (Role Playing)','연기 (Acting)','추론 (Deduction)']::text[], 2019, 'image 3.png', 'https://youtu.be/F5RBnzflr5Y?si=oWDs3Sdu1_s1Huqq', null, false, '{}'::text[]),
+  ('궁신', 'Courtsians', true, '{2,3,4,5}', '{3}', 4, false, 20, 30, 1.3, ARRAY['파티','패밀리']::text[], ARRAY['중세','카드 게임']::text[], ARRAY['게임 종료 보너스 (End game bonuses)','빼앗기 (Take That)','셋 컬렉션 (Set Collection)']::text[], 2024, 'image 4.png', 'https://youtu.be/0-32l53br_g?si=Gr3qjfvYWUKh2zl0', null, false, '{}'::text[]),
+  ('기즈모', 'Gizmos', true, '{2,3,4}', '{2}', 3, false, 40, 50, 2.05, ARRAY['패밀리']::text[], ARRAY['SF 공상 과학','카드 게임']::text[], ARRAY['계약서 (Contracts)','오픈 드래프팅 (Open Drafting)']::text[], 2018, 'image 5.png', 'https://youtu.be/v13dIIz7zFo?si=t-uGbF3g9VCxxlH4', null, false, '{}'::text[]),
+  ('꼬치의 달인', 'Kushi Express', true, '{2,3,4,5,6}', '{3}', 4, false, 20, 20, 1.2, ARRAY['패밀리']::text[], ARRAY['덱스터리티 (손재주)','실시간','음식']::text[], ARRAY['패턴 빌딩 (Pattern Building)']::text[], 2019, 'image 6.png', 'https://youtu.be/NNfhh3CekPc?si=lgm3AJ5GumUNqjOf', null, false, '{}'::text[]),
+  ('꼬치의 달인 : 그랜드마스터', 'Kushi Express : Grandmaster', true, '{2,3,4,5,6}', '{3}', 4, false, 20, 20, 1.2, ARRAY['패밀리']::text[], ARRAY['덱스터리티 (손재주)','실시간','음식']::text[], ARRAY['패턴 빌딩 (Pattern Building)']::text[], 2025, 'image 7.png', 'https://youtu.be/TGC2KFZbrNQ?si=mpe5EYbr9CfZAiUP', null, false, '{}'::text[]),
+  ('꽁냥 꽁냥', 'Cat Fist', true, '{2,3,4}', '{3}', 4, false, 20, 20, 1, ARRAY['패밀리']::text[], ARRAY['고양이','동물','어린이','파티 게임']::text[], ARRAY['운걸기 (Push Your Luck)','타일 놓기 (Tile Placement)']::text[], 2020, 'image 8.png', 'https://youtu.be/qxnhfjqK8xk?si=Rmogt4_9srKki8je', null, false, '{}'::text[]),
+  ('미스터리 파티 : 끝나지 않는 한여름', 'The Endless Midsummer', true, '{8,9}', '{9}', 9, false, 180, 180, 2, ARRAY['미스터리']::text[], ARRAY['디덕션 (추론)','살인 / 미스터리']::text[], ARRAY['롤플레잉 (Role Playing)','연기 (Acting)','추론 (Deduction)']::text[], 2020, 'image 9.png', 'https://youtu.be/htigf2gLveA?si=xAsOb2RjmEPeyjIR', null, false, '{}'::text[]),
+  ('나인 타일 패닉', 'Nine Tiles Panic', true, '{2,3,4,5}', '{3}', 4, false, 20, 20, 1.31, ARRAY['패밀리']::text[], ARRAY['실시간']::text[], ARRAY['실시간 (Real-Time)','타일 놓기 (Tile Placement)','패턴 빌딩 (Pattern Building)']::text[], 2019, 'image 10.png', 'https://youtu.be/scxcXL0O70w?si=8S4Uu7K6-lLBr3If', null, false, '{}'::text[]),
+  ('노 땡스 !', 'No Thanks!', true, '{3,4,5,6,7}', '{3}', 5, false, 20, 20, 1.13, ARRAY['패밀리']::text[], ARRAY['카드 게임']::text[], ARRAY['경매/입찰 (Auction/Bidding)','셋 컬렉션 (Set Collection)','운걸기 (Push Your Luck)']::text[], 2004, 'image 11.png', 'https://youtu.be/aGfk4Y8uWy0?si=c8oou6lBiwH9J0Fl', null, false, '{}'::text[]),
+  ('노 터치 크라켄 디럭스 미니', 'Feed the Kraken : Deluxe Edition MINI', true, '{4,5,6,7,8}', '{5}', 6, false, 30, 30, 1.15, ARRAY['파티']::text[], ARRAY['공포','디덕션 (추론)','블러핑','카드 게임','파티 게임','협상']::text[], ARRAY['배신자 게임 (Traitor Game)','팀 기반 게임 (Team-Based Game)']::text[], 2017, 'image 12.png', 'https://youtu.be/QfEtvTp7A54?si=5HZ3zj_uEBEYf6jx', null, false, '{}'::text[]),
+  ('노팅엄의 지방관', 'Sheriff of Nottingham', true, '{3,4,5,6}', '{4}', 5, false, 60, 60, 1.69, ARRAY['파티','패밀리']::text[], ARRAY['블러핑','소설','유머','중세','카드 게임','파티 게임','협상']::text[], ARRAY['뇌물 수수 (Bribery)','롤플레잉 (Role Playing)','셋 컬렉션 (Set Collection)','오픈 드래프팅 (Open Drafting)','핸드 관리 (Hand Management)']::text[], 2020, 'image 13.png', 'https://youtu.be/U2AeWgqtxls?si=fuoCcLnjzlkVQELd', null, false, '{}'::text[]),
+  ('놉놉 테이블', 'Tap The Table !', true, '{3,4,5,6,7,8}', '{4}', 6, false, 15, 25, 1.5, ARRAY['파티']::text[], ARRAY['단어 게임','카드 게임','파티 게임']::text[], ARRAY['뜨거운 감자 (Hot Potato)','의사소통 제한 (Communication Limits)','협상 (Negotiation)']::text[], 2022, 'image 14.png', 'https://youtu.be/CIh_LDEz9QI?si=3H_XlkaoKzD7b4q7', null, false, '{}'::text[]),
+  ('미스터리 파티 : 늑대인간 마을의 축제', 'The Tale of Twilight Wolves', true, '{7,8}', '{8}', 8, false, 120, 120, 2, ARRAY['미스터리']::text[], ARRAY['디덕션 (추론)','살인 / 미스터리']::text[], ARRAY['롤플레잉 (Role Playing)','연기 (Acting)','추론 (Deduction)']::text[], 2022, 'image 15.png', 'https://youtu.be/rWF0BrOgxOE?si=oVswqDqBJPPZMrD_', null, false, '{}'::text[]),
+  ('다 죽었DAY', 'Prey Another Day', true, '{2,3,4,5}', '{3}', 4, false, 15, 20, 1.1, ARRAY['파티','패밀리']::text[], ARRAY['동물','디덕션 (추론)','블러핑','카드 게임','프린트 & 플레이']::text[], ARRAY['동시 액션 선택 (Simultaneous Action Selection)']::text[], 2023, 'image 16.png', 'https://youtu.be/KRUc_U3dBcQ?si=HkO35thCg3ywic-m', null, false, '{}'::text[]),
+  ('다이 데이', 'Die Day', true, '{2,3,4,5}', '{3}', 4, false, 30, 60, 1.5, ARRAY['파티']::text[], ARRAY['디덕션 (추론)','마피아']::text[], ARRAY['마피아 (Mafia)','비대칭 정보가 있는 역할 (Roles with Asymmetric Information)','추론 (Deduction)','표적 단서 (Targeted Clues)']::text[], 2021, 'image 17.png', 'https://youtu.be/li4-Yylwskw?si=DW70JXay6vENF_ct', null, false, '{}'::text[]),
+  ('데인저 데인저', 'Danger Danger', true, '{2,3,4,5,6,7,8}', '{4}', 2, false, 10, 10, 1.17, ARRAY['패밀리']::text[], ARRAY['실시간','카드 게임']::text[], ARRAY['동시 액션 선택 (Simultaneous Action Selection)','실시간 (Real-Time)']::text[], 2024, 'image 18.png', 'https://youtu.be/cAsWse1h-i8?si=G3_Po9mnlbZmiaF1', null, false, '{}'::text[]),
+  ('도블 : 쿠키런', 'Dobble : Cookie Run', true, '{2,3,4,5,6,7,8}', '{3}', 4, false, 15, 15, 1.04, ARRAY['어린이','파티']::text[], ARRAY['실시간','카드 게임','파티 게임']::text[], ARRAY['패턴 인식 (Pattern Recognition)']::text[], 2009, 'image 19.png', 'https://youtu.be/QIoVUkHLBsU?si=GoGsvpfghqIoU4-_', null, false, '{}'::text[]),
+  ('디셉션 : 홍콩 살인사건', 'Deception : Murder in Hong Kong', true, '{4,5,6,7,8,9,10}', '{5}', 7, true, 20, 20, 1.58, ARRAY['파티']::text[], ARRAY['디덕션 (추론)','블러핑','살인 / 미스터리','스파이','파티 게임']::text[], ARRAY['배신자 게임 (Traitor Game)','변화하는 게임 세팅 (Variable Set-up)','비공개 역할 (Hidden Roles)','스토리텔링 (Storytelling)','의사소통 제한 (Communication Limits)','이벤트 (events)','최종 결말 (Finale Ending)','추론 (Deduction)','팀 기반 게임 (Team-Based Game)']::text[], 2014, 'image 20.png', 'https://youtu.be/PXgd2h2cabg?si=begwI8dlYrNjr3wL', null, false, '{}'::text[]),
+  ('디크립토', 'Decrypto', true, '{3,4,5,6,7,8}', '{4}', 6, false, 15, 45, 1.83, ARRAY['파티']::text[], ARRAY['단어 게임','디덕션 (추론)','스파이','파티 게임']::text[], ARRAY['의사소통 제한 (Communication Limits)','팀 기반 게임 (Team-Based Game)','표적 단서 (Targeted Clues)']::text[], 2018, 'image 21.png', 'https://youtu.be/pdGw9iy-9do?si=KOlfhAxny-ebPROR', null, false, '{}'::text[]),
+  ('디텍티브 : 모던 크라임', 'Detective : A Modern Crime Board Game', true, '{1,2,3,4,5}', '{3}', 2, false, 120, 180, 2.74, ARRAY['미스터리']::text[], ARRAY['디덕션 (추론)','살인 / 미스터리']::text[], ARRAY['솔로/솔로테어 게임 (Solo / Solitaire Game)','스토리텔링 (Storytelling)','시나리오/미션/캠페인 게임 (Scenario / Mission / Campaign Game)','이야기/단락 선택 (Narrative Choice / Paragraph)','플레이어별 특수능력 (Variable Player Powers)','협력 게임 (Cooperative Game)']::text[], 2018, 'image 22.png', 'https://youtu.be/WcdgD1qChrU?si=DO8JWLg9pm1-MtQs', null, false, '{}'::text[]),
+  ('딕싯', 'Dixit', true, '{3,4,5,6,7,8}', '{4}', 6, false, 30, 30, 1.8, ARRAY['파티']::text[], ARRAY['유머','카드 게임','파티 게임']::text[], ARRAY['레이스 (Race)','스토리텔링 (Storytelling)','투표 (Voting)','표적 단서 (Targeted Clues)']::text[], 2008, 'image 23.png', 'https://youtu.be/SWvzmI2jts8?si=uWj8uYzhrKwz-t8D', null, false, '{}'::text[]),
+  ('딕싯 : 디즈니 에디션', 'Dixit : Disney Edition', true, '{3,4,5,6}', '{4}', 6, false, 30, 30, 1.11, ARRAY['파티']::text[], ARRAY['카드 게임','파티 게임']::text[], ARRAY['스토리텔링 (Storytelling)','투표 (Voting)','표적 단서 (Targeted Clues)']::text[], 2023, 'image 24.png', 'https://youtu.be/SWvzmI2jts8?si=uWj8uYzhrKwz-t8D', null, false, '{}'::text[]),
+  ('딕싯 : 예지', 'Dixit : Revelations', true, '{3,4,5,6}', '{4}', 6, false, 30, 30, 1.18, ARRAY['파티']::text[], ARRAY['카드 게임','파티 게임']::text[], ARRAY['스토리텔링 (Storytelling)','투표 (Voting)']::text[], 2016, 'image 25.png', 'https://youtu.be/SWvzmI2jts8?si=uWj8uYzhrKwz-t8D', null, false, '{}'::text[]),
+  ('라 비냐', 'La Vina', true, '{2,3,4,5}', '{2}', 4, false, 30, 45, 2.07, ARRAY['패밀리']::text[], ARRAY['카드 게임']::text[], ARRAY['셋 컬렉션 (Set Collection)','핸드 관리 (Hand Management)']::text[], 2019, 'image 26.png', 'https://youtu.be/Lng2fkkXitY?si=1bwZSIi8V1i6z-bT', null, false, '{}'::text[]),
+  ('러시안 룰렛 풍선버전', 'Russian Roulette', true, '{2,3,4,5,6}', '{5}', 4, false, 5, 5, 1, ARRAY['파티']::text[], ARRAY['실시간','파티 게임']::text[], ARRAY['경과된 실시간 종료 (Elapsed Real Time Ending)','배팅과 블러핑 (Betting and Bluffing)','협상 (Negotiation)']::text[], 2012, 'image 27.png', 'https://youtu.be/HbQ5OxQZ9jc?si=BmDiATA9_-CNf67b', null, false, '{}'::text[]),
+  ('레디 셋 벳', 'Ready Set Bet', true, '{2,3,4,5,6,7,8,9}', '{4}', 6, false, 45, 60, 1.31, ARRAY['파티']::text[], ARRAY['동물','레이싱','스포츠','실시간','파티 게임']::text[], ARRAY['레이스 (Race)','배팅과 블러핑 (Betting and Bluffing)','실시간 (Real-Time)','주사위 굴림 (Dice Rolling)','트랙 이동 (Track Movement)']::text[], 2022, 'image 28.png', 'https://youtu.be/GoCY-WTHOQU?si=NmrIyHaOnlwKuFyP', null, false, '{}'::text[]),
+  ('레지스탕스 : 아발론', 'The Resistance : Avalon', true, '{5,6,7,8,9,10}', '{6}', 7, true, 30, 30, 1.74, ARRAY['파티']::text[], ARRAY['디덕션 (추론)','블러핑','스파이','중세','카드 게임','파티 게임','판타지','협상']::text[], ARRAY['동시 액션 선택 (Simultaneous Action Selection)','배신자 게임 (Traitor Game)','비공개 역할 (Hidden Roles)','비대칭 정보가 있는 역할 (Roles with Asymmetric Information)','최종 결말 (Finale Ending)','투표 (Voting)','팀 기반 게임 (Team-Based Game)','플레이어별 특수능력 (Variable Player Powers)']::text[], 2012, 'image 29.png', 'https://youtu.be/Isu7Qqk-Vtw?si=ZjINAS7P2jwSwPgd', null, false, '{}'::text[]),
+  ('로오-딩', 'Loading', true, '{2,3,4,5,6,7}', '{5}', 4, false, 5, 5, 1.2, ARRAY['파티']::text[], ARRAY['실시간','카드 게임']::text[], ARRAY['동시 액션 선택 (Simultaneous Action Selection)','레이스 (Race)','서든 데쓰 엔딩 (Sudden Death Ending)','스피드 매칭 (Speed Matching)','클로즈 드래프팅 (Closed Drafting)']::text[], 2021, 'image 30.png', 'https://youtu.be/hUwkrLX5UaA?si=hd8OsqL7shfwu6dO', null, false, '{}'::text[]),
+  ('마작', 'Mahjong', true, '{3,4}', '{3}', 4, false, 120, 120, 2.58, ARRAY['추상']::text[], ARRAY['추상전략']::text[], ARRAY['셋 컬렉션 (Set Collection)','핸드 관리 (Hand Management)']::text[], 1850, 'image 31.png', 'https://youtu.be/HVkxIMmFk8w?si=lQoVJWCQzlgZKqO6', null, false, '{}'::text[]),
+  ('마헤', 'Mahe', true, '{2,3,4,5,6}', '{4}', 6, false, 20, 20, 1.22, ARRAY['어린이','패밀리']::text[], ARRAY['동물','주사위']::text[], ARRAY['롤/스핀 및 이동 (Roll / Spin and Move)','운걸기 (Push Your Luck)','주사위 굴림 (Dice Rolling)']::text[], 1974, 'image 32.png', 'https://youtu.be/x2iVRehGzHM?si=xlzXkGkaFeh0nkPw', null, false, '{}'::text[]),
+  ('만월화투', 'Flower Card', true, '{2,3,4,5}', '{4}', 3, false, 60, 60, 2.27, ARRAY['패밀리']::text[], ARRAY['카드 게임']::text[], ARRAY['셋 컬렉션 (Set Collection)','운걸기 (Push Your Luck)','핸드 관리 (Hand Management)']::text[], 1889, 'image 33.png', 'https://youtu.be/7edr5xqL74M?si=hr8HTWSAu91Ne6Yc', null, false, '{}'::text[]),
+  ('머핀 타임', 'Muffin Time', true, '{2,3,4,5,6,7,8}', '{3}', 5, false, 20, 40, 1.03, ARRAY['파티']::text[], ARRAY['카드 게임','파티 게임']::text[], ARRAY['빼앗기 (Take That)','핸드 관리 (Hand Management)']::text[], 2021, 'image 34.png', 'https://youtu.be/zphwTeKd5Tk?si=d56cONr7aangXFGq', null, false, '{}'::text[]),
+  ('미스터리 파티 : 몇 번이고 푸른 달에 불을 붙였다', 'Once In A Blue Moon', true, '{6,7}', '{7}', 7, false, 150, 150, 2, ARRAY['미스터리']::text[], ARRAY['디덕션 (추론)','살인 / 미스터리']::text[], ARRAY['롤플레잉 (Role Playing)','연기 (Acting)','추론 (Deduction)']::text[], 2019, 'image 35.png', 'https://youtu.be/JIJyFThoqkc?si=zUdesIRmYlifCSHM', null, false, '{}'::text[]),
+  ('모자가 아니잖아', 'That’s Not A Hat', true, '{3,4,5,6,7,8}', '{4}', 5, false, 15, 15, 1.06, ARRAY['파티']::text[], ARRAY['기억력','블러핑','파티 게임']::text[], ARRAY['기억력 (Memory)']::text[], 2023, 'image 36.png', 'https://youtu.be/c0CqrBEy2o8?si=klOAbJBNXsZHH5Bw', null, false, '{}'::text[]),
+  ('미크로 마크로 : 크라임 시티 - 올 인', 'MicroMacro : Crime City - All In', true, '{1,2,3,4}', '{3}', 2, false, 15, 45, 1.08, ARRAY['테마','패밀리']::text[], ARRAY['디덕션 (추론)','살인 / 미스터리','유머']::text[], ARRAY['솔로/솔로테어 게임 (Solo / Solitaire Game)','시나리오/미션/캠페인 게임 (Scenario / Mission / Campaign Game)','추론 (Deduction)','팀 기반 게임 (Team-Based Game)','협력 게임 (Cooperative Game)']::text[], 2022, 'image 37.png', 'https://youtu.be/U0rKMRozfI8?si=lBVrxiCwhD542PBu', null, false, '{}'::text[]),
+  ('바보 타임', 'Fou Fou Fou !', true, '{3,4,5,6,7,8}', '{3}', 8, false, 15, 15, 1.33, ARRAY['파티']::text[], ARRAY['파티 게임']::text[], ARRAY['보유 액션 수행 (Action Retrieval)','실시간 (Real-Time)']::text[], 2019, 'image 38.png', 'https://youtu.be/yXIlsCieh90?si=bR9ZC83N3Z1hsl7v', null, false, '{}'::text[]),
+  ('바퀴벌레 포커 로얄', 'Cockroach Poker Royal', true, '{2,3,4,5,6}', '{3}', 5, false, 15, 25, 1.8, ARRAY['파티']::text[], ARRAY['블러핑','카드 게임']::text[], ARRAY['셋 컬렉션 (Set Collection)','한 명의 패자 게임 (Single Loser Game)','핸드 관리 (Hand Management)']::text[], 2012, 'image 39.png', 'https://youtu.be/zTiUHEsK8Vk?si=hoEK3tQ3N_WYZAe7', null, false, '{}'::text[]),
+  ('배럴 다이스', 'Polterfass', true, '{3,4,5,6}', '{3}', 4, false, 20, 20, 1.58, ARRAY['파티']::text[], ARRAY['주사위']::text[], ARRAY['동시 액션 선택 (Simultaneous Action Selection)','운걸기 (Push Your Luck)','주사위 굴림 (Dice Rolling)']::text[], 2013, 'image 40.png', 'https://youtu.be/g0Mouje6auw?si=kpE7wHYKX5xfnd_U', null, false, '{}'::text[]),
+  ('뱅 !', 'BANG!', true, '{4,5,6,7}', '{5}', 7, false, 20, 40, 1.63, ARRAY['파티']::text[], ARRAY['디덕션 (추론)','블러핑','전투','카드 게임']::text[], ARRAY['뜨거운 감자 (Hot Potato)','비공개 역할 (Hidden Roles)','빼앗기 (Take That)','킬 스틸 (Kill Steal)','팀 기반 게임 (Team-Based Game)','플레이어 제거 (Player Elimination)','플레이어별 특수능력 (Variable Player Powers)','핸드 관리 (Hand Management)']::text[], 2002, 'image 41.png', 'https://youtu.be/GApFDV0QcAY?si=8yfcLsctEDjKQdMN', null, false, '{}'::text[]),
+  ('버건디의 성', 'The Castles of Burgundy', true, '{1,2,3,4}', '{3}', 2, false, 70, 120, 3, ARRAY['전략']::text[], ARRAY['영역 건설','주사위','중세']::text[], ARRAY['게임 종료 보너스 (End game bonuses)','그리드 범위 (Grid Coverage)','변화하는 게임 세팅 (Variable Set-up)','셋 컬렉션 (Set Collection)','솔로/솔로테어 게임 (Solo / Solitaire Game)','육각형 그리드 (Hexagon Grid)','주사위 굴림 (Dice Rolling)','주사위 일꾼 놓기 (Worker Placement with Dice Workers)','차례 순서: 스탯 기반 (Turn Order: Stat-Based)','타일 놓기 (Tile Placement)','팀 기반 게임 (Team-Based Game)','패턴 빌딩 (Pattern Building)']::text[], 2019, 'image 42.png', 'https://youtu.be/SyZXSK2466s?si=rPad4gGGQ-W7jS2y', null, false, '{}'::text[]),
+  ('보난자', 'Bohnanza', true, '{3,4,5}', '{3}', 5, false, 45, 45, 1.67, ARRAY['패밀리']::text[], ARRAY['농업','카드 게임','협상']::text[], ARRAY['거래 (Trading)','셋 컬렉션 (Set Collection)','핸드 관리 (Hand Management)','협상 (Negotiation)']::text[], 1997, 'image 43.png', 'https://youtu.be/OwgKvBQ7bqs?si=Ce8hRG6hxtYnwRrS', null, false, '{}'::text[]),
+  ('머더 미스터리 미니 : 보랏못 리라이트', 'Shinofuchi Rewrite', true, '{2}', '{2}', 2, false, 60, 60, 2, ARRAY['미스터리']::text[], ARRAY['디덕션 (추론)','살인 / 미스터리']::text[], ARRAY['롤플레잉 (Role Playing)','연기 (Acting)','추론 (Deduction)']::text[], 2021, 'image 44.png', 'https://youtu.be/Nzmlcb9dUQg?si=a-ZCLQ-fX-FDeih2', null, false, '{}'::text[]),
+  ('봄 버스터즈', 'Bomb Busters', true, '{2,3,4,5}', '{3}', 4, false, 30, 30, 1.96, ARRAY['패밀리']::text[], ARRAY['디덕션 (추론)','스파이']::text[], ARRAY['게임당 1회 능력 (Once-Per-Game Abilities)','기억력 (Memory)','서든 데쓰 엔딩 (Sudden Death Ending)','시나리오/미션/캠페인 게임 (Scenario / Mission / Campaign Game)','실시간 (Real-Time)','의사소통 제한 (Communication Limits)','추론 (Deduction)','협력 게임 (Cooperative Game)']::text[], 2024, 'image 45.png', 'https://youtu.be/4tV0ArIijuI?si=J-C73t_rvzwLksmO', null, false, '{}'::text[]),
+  ('붐 버스터즈', 'Boombeados', true, '{2,3,4,5,6}', '{4}', 5, false, 10, 20, 1, ARRAY['파티']::text[], ARRAY['카드 게임']::text[], ARRAY['빼앗기 (Take That)','운걸기 (Push Your Luck)','핸드 관리 (Hand Management)']::text[], 2021, 'image 46.png', 'https://youtu.be/jj4nfP27SgI?si=RJ1UGAvAUlQRj6LF', null, false, '{}'::text[]),
+  ('블랙 프라이데이', 'Black Friday', true, '{2,3,4,5}', '{3}', 4, false, 45, 60, 2.73, ARRAY['전략','파티']::text[], ARRAY['경제']::text[], ARRAY['배팅과 블러핑 (Betting and Bluffing)','상품 투기 (Commodity Speculation)','시뮬레이션 (Simulation)','시장 (Market)','주식 보유 (Stock Holding)','투자 (Investment)']::text[], 2023, 'image 47.png', 'https://youtu.be/3FuMuMYTOA0?si=6QxYHc7e4_b-8P2F', null, false, '{}'::text[]),
+  ('사보타지', 'Saboteur', true, '{3,4,5,6,7,8,9,10}', '{5}', 7, true, 30, 30, 1.3, ARRAY['파티','패밀리']::text[], ARRAY['블러핑','카드 게임','파티 게임']::text[], ARRAY['네트워크 및 경로 구축 (Network and Route Building)','팀 기반 게임 (Team-Based Game)','핸드 관리 (Hand Management)']::text[], 2004, 'image 48.png', 'https://youtu.be/xUHt9V-iHnI?si=ukWJm6TC76fg5VZe', null, true, ARRAY['weight']::text[]),
+  ('서스펙트 게임 : 클로즈드 서클 미스터리', 'Suspect Game : Closed Circle Mystery', true, '{4}', '{4}', 4, false, 120, 480, 2.25, ARRAY['미스터리']::text[], ARRAY['디덕션 (추론)','살인 / 미스터리']::text[], ARRAY['롤플레잉 (Role Playing)','추론 (Deduction)']::text[], 2021, 'image 49.png', 'https://youtu.be/Fv9EWU3HbF0?si=KHnIA5sSQrjn8zZ-', null, false, '{}'::text[]),
+  ('스마트폰 주식회사', 'Smartphone Inc.', true, '{1,2,3,4,5}', '{4}', 5, false, 60, 90, 2.8, ARRAY['전략']::text[], ARRAY['경제','산업 / 제조']::text[], ARRAY['네트워크 및 경로 구축 (Network and Route Building)','동시 액션 선택 (Simultaneous Action Selection)','레이어링 (Layering)','변화하는 게임 세팅 (Variable Set-up)','솔로/솔로테어 게임 (Solo / Solitaire Game)','액션 대기열 (Action Queue)','지역 최다 / 영향력 (Area Majority / Influence)']::text[], 2018, 'image 50.png', 'https://youtu.be/Eb06wvsD5xw?si=2lFN2BECcMife2UO', null, false, '{}'::text[]),
+  ('스위스 사는 스미스씨', 'Mr. Smith Living in Swiss', true, '{2,3,4,5,6}', '{6}', 5, false, 15, 15, 1, ARRAY['파티']::text[], ARRAY['카드 게임','파티 게임','행동']::text[], ARRAY['실시간 (Real-Time)']::text[], 2024, 'image 51.png', 'https://youtu.be/TMsfh-G9kHI?si=Pd37LBPwkahThrII', null, false, '{}'::text[]),
+  ('스컬킹', 'Skull King', true, '{2,3,4,5,6,7,8}', '{3}', 5, false, 30, 30, 1.74, ARRAY['패밀리']::text[], ARRAY['카드 게임','항해','해적']::text[], ARRAY['예측 입찰 (Predictive Bid)','트릭-테이킹 (Trick-taking)']::text[], 2013, 'image 52.png', 'https://youtu.be/cYB1h4xOonI?si=W_gdkHVrxjX-SSfq', null, false, '{}'::text[]),
+  ('스타트업스', 'Startups', true, '{3,4,5,6,7}', '{3}', 4, false, 20, 20, 1.59, ARRAY['패밀리']::text[], ARRAY['카드 게임']::text[], ARRAY['뜨거운 감자 (Hot Potato)','셋 컬렉션 (Set Collection)','점수 계산 및 리셋 게임 (Score-and-Reset Game)','지역 최다 / 영향력 (Area Majority / Influence)','투자 (Investment)']::text[], 2017, 'image 53.png', 'https://youtu.be/oh7ORakdGsY?si=raPp4YNzOnRarKIU', null, false, '{}'::text[]),
+  ('스트림스 메트로', 'Metro Bingo', true, '{2,3,4,5,6,7,8,9,10}', '{5}', 6, true, 10, 10, 1, ARRAY['파티']::text[], ARRAY['수학','퍼즐']::text[], ARRAY['빙고 (Bingo)','종이와 펜 (Paper-and-Pencil)','패턴 빌딩 (Pattern Building)']::text[], 2025, 'image 54.png', 'https://youtu.be/PECBxv__Bjk?si=oPNTqRAl4TBsFbG6', null, false, '{}'::text[]),
+  ('스틱스택', 'Stick Stack', true, '{2,3,4,5,6,7,8,9,10}', '{5}', 6, true, 10, 10, 1, ARRAY['파티']::text[], ARRAY['덱스터리티 (손재주)','실시간','행동']::text[], ARRAY['패턴 빌딩 (Pattern Building)']::text[], 2016, 'image 55.png', 'https://youtu.be/iOBj8vo4n-E?si=pvEZQ09CFAPxKwjE', null, false, '{}'::text[]),
+  ('스파이폴 2', 'Spyfall 2', true, '{3,4,5,6,7,8,9,10}', '{5}', 6, true, 15, 15, 1.22, ARRAY['파티']::text[], ARRAY['디덕션 (추론)','블러핑','스파이','유머','파티 게임']::text[], ARRAY['기억력 (Memory)','롤플레잉 (Role Playing)','연기 (Acting)','투표 (Voting)']::text[], 2017, 'image 56.png', 'https://youtu.be/vXh1SLF3c_M?si=Q3i9ImD_9OGoUyvN', null, false, '{}'::text[]),
+  ('스페이스 크루', 'The Crew : The Quest for Planet Nine', true, '{2,3,4,5}', '{3}', 4, false, 20, 20, 1.96, ARRAY['패밀리']::text[], ARRAY['SF 공상 과학','우주 탐험','카드 게임']::text[], ARRAY['시나리오/미션/캠페인 게임 (Scenario / Mission / Campaign Game)','의사소통 제한 (Communication Limits)','트릭-테이킹 (Trick-taking)','핸드 관리 (Hand Management)','협력 게임 (Cooperative Game)']::text[], 2019, 'image 57.png', 'https://youtu.be/V8BDvlAj_GY?si=NaaUrVkPvKmriT8M', null, false, '{}'::text[]),
+  ('스플렌더', 'Splendor', true, '{2,3,4}', '{2}', 3, false, 30, 30, 2.25, ARRAY['패밀리']::text[], ARRAY['경제','르네상스','카드 게임']::text[], ARRAY['계약서 (Contracts)','레이스 (Race)','셋 컬렉션 (Set Collection)','오픈 드래프팅 (Open Drafting)']::text[], 2014, 'image 58.png', 'https://youtu.be/3Y-VZ3pCSlw?si=mQC6PP1gwKZDYK87', null, false, '{}'::text[]),
+  ('슬루스 : 사라진 보석을 찾아라', 'Sleuth', true, '{3,4,5,6,7}', '{5}', 4, false, 30, 45, 2.46, ARRAY['전략']::text[], ARRAY['디덕션 (추론)','카드 게임']::text[], ARRAY['기억력 (Memory)','종이와 펜 (Paper-and-Pencil)','추론 (Deduction)','핸드 관리 (Hand Management)']::text[], 1971, 'image 59.png', 'https://youtu.be/t_7SAJhNIEI?si=R0DICHSt4d_pQsYJ', null, false, '{}'::text[]),
+  ('머더 미스터리 미니 : 시간을 달리는 트라이앵글', 'Triangle Through the Time', true, '{3}', '{3}', 3, false, 90, 90, 2, ARRAY['미스터리']::text[], ARRAY['디덕션 (추론)','살인 / 미스터리']::text[], ARRAY['롤플레잉 (Role Playing)','연기 (Acting)','추론 (Deduction)']::text[], 2021, 'image 60.png', 'https://youtu.be/Nzmlcb9dUQg?si=a-ZCLQ-fX-FDeih2', null, false, '{}'::text[]),
+  ('머더 미스터리 미니 : 시체와 온천', 'In an Inn', true, '{4,5}', '{4}', 5, false, 60, 60, 2, ARRAY['미스터리']::text[], ARRAY['디덕션 (추론)','살인 / 미스터리']::text[], ARRAY['롤플레잉 (Role Playing)','연기 (Acting)','추론 (Deduction)']::text[], 2021, 'image 61.png', 'https://youtu.be/Nzmlcb9dUQg?si=a-ZCLQ-fX-FDeih2', null, false, '{}'::text[]),
+  ('시크릿 히틀러', 'Secret Hitler', true, '{5,6,7,8,9,10}', '{6}', 8, true, 45, 45, 1.74, ARRAY['파티']::text[], ARRAY['디덕션 (추론)','블러핑','유머','정치','카드 게임','파티 게임','프린트 & 플레이']::text[], ARRAY['배신자 게임 (Traitor Game)','비공개 역할 (Hidden Roles)','투표 (Voting)','팀 기반 게임 (Team-Based Game)','플레이어 제거 (Player Elimination)']::text[], 2016, 'image 62.png', 'https://youtu.be/u6qjCyEFq4U?si=ODyGblnUPNZkWvZK', null, false, '{}'::text[]),
+  ('아줄', 'Azul', true, '{2,3,4}', '{4}', 2, false, 30, 45, 1.77, ARRAY['추상','패밀리']::text[], ARRAY['르네상스','추상전략','퍼즐']::text[], ARRAY['게임 종료 보너스 (End game bonuses)','셋 컬렉션 (Set Collection)','오픈 드래프팅 (Open Drafting)','차례 순서: 클레임 액션 (Turn Order: Claim Action)','타일 놓기 (Tile Placement)','패턴 빌딩 (Pattern Building)']::text[], 2017, '1616026481-610481_w1000.jpg', 'https://youtu.be/PLCU5GlgQC4?si=NMoj3-fv9bj30NOv', null, false, '{}'::text[]),
+  ('애니모크레이지', 'AnimoCrazy', true, '{4,5,6,7,8,9,10}', '{6}', 7, true, 30, 30, 1.28, ARRAY['파티']::text[], ARRAY['카드 게임','파티 게임']::text[], ARRAY['투표 (Voting)']::text[], 2000, 'image 63.png', 'https://youtu.be/RiqmQHCmlME?si=wNtM0iGB0JTuk6g3', null, false, '{}'::text[]),
+  ('양적 완화', 'Q.E. (Quantitative Easing)', true, '{3,4,5}', '{5}', 4, false, 45, 45, 1.54, ARRAY['전략']::text[], ARRAY['경제']::text[], ARRAY['게임 종료 보너스 (End game bonuses)','경매/입찰 (Auction/Bidding)','경매: 비공개 입찰 (Auction: Sealed Bid)','기억력 (Memory)','셋 컬렉션 (Set Collection)']::text[], 2019, 'image 64.png', 'https://youtu.be/URLFrbSAIGg?si=jTGlzoue3eRxnQNd', null, false, '{}'::text[]),
+  ('어콰이어', 'Acquire', true, '{2,3,4,5,6}', '{3}', 4, false, 90, 90, 2.49, ARRAY['전략']::text[], ARRAY['경제','영역 건설']::text[], ARRAY['시장 (Market)','자원 승점 (Victory Points as a Resource)','정사각형 그리드 (Square Grid)','주식 보유 (Stock Holding)','타일 놓기 (Tile Placement)','투자 (Investment)','핸드 관리 (Hand Management)']::text[], 1999, 'image 65.png', 'https://youtu.be/TG7X9YxYtnQ?si=8b-sztD7EX3HrLbM', null, false, '{}'::text[]),
+  ('엘리베이터 앞에서', 'In Front of the Elevators', true, '{2,3,4}', '{3}', 4, false, 20, 40, 1.41, ARRAY['패밀리']::text[], ARRAY['카드 게임']::text[], ARRAY['지역 최다 / 영향력 (Area Majority / Influence)','핸드 관리 (Hand Management)']::text[], 2019, 'image 66.png', 'https://youtu.be/OJg9EQPVzmI?si=Z_xAzfAnuTMyXCfP', null, false, '{}'::text[]),
+  ('옛날 옛적에', 'Once Upon a Time', true, '{2,3,4,5,6}', '{3}', 5, false, 30, 30, 1.37, ARRAY['파티']::text[], ARRAY['실시간','유머','카드 게임','파티 게임']::text[], ARRAY['스토리텔링 (Storytelling)','차례 진행 방해 (Interrupts)','투표 (Voting)','핸드 관리 (Hand Management)']::text[], 1993, 'image 67.png', 'https://youtu.be/VpySzPQp5jQ?si=RZUlu87A9ftZ1vpF', null, false, '{}'::text[]),
+  ('오리지널 마피아', 'Original Mafia Cards', true, '{6,7,8,9,10}', '{7}', 10, true, 45, 45, 1.5, ARRAY['파티']::text[], ARRAY['디덕션 (추론)','마피아','카드 게임']::text[], ARRAY['배신자 게임 (Traitor Game)','비공개 역할 (Hidden Roles)','추론 (Deduction)','협상 (Negotiation)']::text[], 2009, 'image 68.png', 'https://youtu.be/N_-aF6bronI?si=BnetshXJl0k5kWOa', null, false, '{}'::text[]),
+  ('미스터리 파티 : 용사가 죽었다', 'The Brave is Dead', true, '{6,7,8}', '{7}', 8, false, 180, 180, 2, ARRAY['미스터리']::text[], ARRAY['디덕션 (추론)','살인 / 미스터리']::text[], ARRAY['롤플레잉 (Role Playing)','연기 (Acting)','추론 (Deduction)']::text[], 2022, 'image 69.png', 'https://youtu.be/RiBcVOIgJsk?si=8kCGdmrQj2M439Fy', null, false, '{}'::text[]),
+  ('우노', 'UNO', true, '{2,3,4,5,6,7,8,9,10}', '{3}', 4, true, 30, 30, 1.1, ARRAY['패밀리']::text[], ARRAY['카드 게임']::text[], ARRAY['빼앗기 (Take That)','차례 상실 (Lose a Turn)','핸드 관리 (Hand Management)']::text[], 1971, 'image 70.png', 'https://youtu.be/bbtMloNezvM?si=HT3ZUgoRxqwaBmMA', null, false, '{}'::text[]),
+  ('머더 미스터리 미니 : 웬디, 어른이 되렴', 'Wendy, Grow Up', true, '{4,5}', '{5}', 5, false, 120, 120, 2, ARRAY['미스터리']::text[], ARRAY['디덕션 (추론)','살인 / 미스터리']::text[], ARRAY['롤플레잉 (Role Playing)','연기 (Acting)','추론 (Deduction)']::text[], 2021, 'image 71.png', 'https://youtu.be/Nzmlcb9dUQg?si=a-ZCLQ-fX-FDeih2', null, false, '{}'::text[]),
+  ('위대한 달무티', 'The Great Dalmuti', true, '{4,5,6,7,8}', '{6}', 5, false, 45, 45, 1.29, ARRAY['파티']::text[], ARRAY['중세','카드 게임']::text[], ARRAY['사다리 타기 (Ladder Climbing)','핸드 관리 (Hand Management)']::text[], 1995, 'image 72.png', 'https://youtu.be/sO-vxnoL31A?si=C5UDnoS2q7V5gcj5', null, false, '{}'::text[]),
+  ('이리하여 나는 독재자가 되었다', 'And Then I Became the Dictator', true, '{4,5,6,7,8,9,10}', '{4}', 6, true, 30, 30, 1.67, ARRAY['파티']::text[], ARRAY['디덕션 (추론)']::text[], ARRAY['동시 액션 선택 (Simultaneous Action Selection)','핸드 관리 (Hand Management)']::text[], 2018, 'image 73.png', 'https://youtu.be/PMLFgiqVCC4?si=mkzBj1xhYajhon5n', null, false, '{}'::text[]),
+  ('익스플로딩 키튼', 'Exploding Kittens', true, '{2,3,4,5}', '{4}', 5, false, 15, 15, 1, ARRAY['파티']::text[], ARRAY['고양이','유머','카드 게임','코믹북 / 만화']::text[], ARRAY['뜨거운 감자 (Hot Potato)','빼앗기 (Take That)','셋 컬렉션 (Set Collection)','운걸기 (Push Your Luck)','플레이어 제거 (Player Elimination)','핸드 관리 (Hand Management)']::text[], 2015, 'image 74.png', 'https://youtu.be/wXtAh3Ty6YU?si=PnhYWFe2Yx0TtUXr', null, false, '{}'::text[]),
+  ('잠만보 다이스 게임', 'Pokemon Dicegame', true, '{1,2,3,4,5,6,7,8,9,10}', '{4}', 4, true, 15, 15, 1, ARRAY['파티']::text[], ARRAY['주사위']::text[], ARRAY['점수 계산 및 리셋 게임 (Score-and-Reset Game)','주사위 굴림 (Dice Rolling)']::text[], 2023, 'image 75.png', 'https://youtu.be/l9s5b9OeGdM?si=RxY8IlUefv77DaUN', null, false, '{}'::text[]),
+  ('장난꾸러기 나방', 'Cheating Moth', true, '{3,4,5}', '{3}', 5, false, 30, 30, 1.15, ARRAY['파티']::text[], ARRAY['덱스터리티 (손재주)','카드 게임','행동']::text[], ARRAY['핸드 관리 (Hand Management)']::text[], 2011, 'image 76.png', 'https://youtu.be/Z9nRjv3KpBI?si=Uz2-ZDdzuBlMVvnv', null, false, '{}'::text[]),
+  ('젝스님트 !', '6 nimmt !', true, '{2,3,4,5,6,7,8,9,10}', '{4}', 5, true, 45, 45, 1.19, ARRAY['패밀리']::text[], ARRAY['카드 게임']::text[], ARRAY['동시 액션 선택 (Simultaneous Action Selection)','핸드 관리 (Hand Management)']::text[], 1994, 'image 77.png', 'https://youtu.be/KCVWucCsLZk?si=iVIS-HRBV6XFh9TC', null, false, '{}'::text[]),
+  ('미스터리 파티 : 죄와 벌의 도서관', 'Crime and Punishment in Bibliotheca', true, '{5,6}', '{6}', 6, false, 150, 150, 2, ARRAY['미스터리']::text[], ARRAY['디덕션 (추론)','살인 / 미스터리']::text[], ARRAY['롤플레잉 (Role Playing)','연기 (Acting)','추론 (Deduction)']::text[], 2022, 'image 78.png', 'https://youtu.be/pfwFdhbw5sU?si=lg1tZDLQov8wlJGA', null, false, '{}'::text[]),
+  ('초밥대왕', 'Sushi Go Party !', true, '{2,3,4,5,6,7,8}', '{3}', 4, false, 20, 20, 1.32, ARRAY['패밀리']::text[], ARRAY['카드 게임','파티 게임']::text[], ARRAY['게임 종료 보너스 (End game bonuses)','동시 액션 선택 (Simultaneous Action Selection)','변화하는 게임 세팅 (Variable Set-up)','셋 컬렉션 (Set Collection)','클로즈 드래프팅 (Closed Drafting)','핸드 관리 (Hand Management)']::text[], 2016, '1676565042686632_lg.jpg', 'https://youtu.be/eTHyJNSQxrA?si=at3325RL-NDTr4YO', null, false, '{}'::text[]),
+  ('카르카손', 'Carcassonne', true, '{2,3,4,5}', '{4}', 2, false, 35, 45, 1.89, ARRAY['패밀리']::text[], ARRAY['영역 건설','중세']::text[], ARRAY['맵 추가 (Map Addition)','울타리 (Enclosure)','지역 최다 / 영향력 (Area Majority / Influence)','타일 놓기 (Tile Placement)']::text[], 2000, '170671827431712_lg.png', 'https://youtu.be/mVK7YZLPvx4?si=GqmQz8ZUaTweRq6V', '영문판', false, '{}'::text[]),
+  ('카멜업', 'Camel Up', true, '{3,4,5,6,7,8}', '{4}', 5, false, 30, 45, 1.5, ARRAY['파티']::text[], ARRAY['동물','레이싱','아라비안','주사위']::text[], ARRAY['롤/스핀 및 이동 (Roll / Spin and Move)','베팅 / 내기 (Betting/Wagering)','주사위 굴림 (Dice Rolling)','트랙 이동 (Track Movement)']::text[], 2018, '1642264705081227_lg.jpg', 'https://youtu.be/x7rk20XgIEE?si=i7IMGKm_C2ZdM5YG', '2판', false, '{}'::text[]),
+  ('캐스캐디아', 'Cascadia', true, '{1,2,3,4}', '{4}', 2, false, 30, 45, 1.85, ARRAY['추상','패밀리']::text[], ARRAY['동물','퍼즐','환경']::text[], ARRAY['게임 종료 보너스 (End game bonuses)','변화하는 게임 세팅 (Variable Set-up)','솔로/솔로테어 게임 (Solo / Solitaire Game)','오픈 드래프팅 (Open Drafting)','육각형 그리드 (Hexagon Grid)','자원 승점 (Victory Points as a Resource)','타일 놓기 (Tile Placement)','패턴 빌딩 (Pattern Building)']::text[], 2021, '1643045818346173_lg.jpg', 'https://youtu.be/rN2xqTynWu8?si=dZ-aEpCBQ_TZHsF4', null, false, '{}'::text[]),
+  ('커피 트레이더', 'Coffee Traders', true, '{2,3,4,5}', '{3}', 4, false, 120, 150, 4.26, ARRAY['전략']::text[], ARRAY['경제','농업','산업 / 제조','영역 건설']::text[], ARRAY['계약서 (Contracts)','액션 포인트 (Action Points)','지역 최다 / 영향력 (Area Majority / Influence)','차례 순서: 패스 순서 (Turn Order: Pass Order)']::text[], 2021, '165289049287926_lg.jpg', 'https://youtu.be/_dAeJcMBJkI?si=1MI1mEnhGYp79C9J', null, false, '{}'::text[]),
+  ('컵 더 크랩', 'Cup the Crab', true, '{3,4,5}', '{5}', 4, false, 10, 30, 1.5, ARRAY['파티']::text[], ARRAY['카드 게임']::text[], ARRAY['핸드 관리 (Hand Management)']::text[], 2025, '1747737515-409923.jpg', 'https://youtu.be/nJr9tDuSl7o?si=c5rDFadn7r4JkgEI', null, false, '{}'::text[]),
+  ('코드네임', 'Codenames', true, '{2,3,4,5,6,7,8}', '{4}', 6, false, 15, 15, 1.26, ARRAY['파티']::text[], ARRAY['단어 게임','디덕션 (추론)','스파이','카드 게임','파티 게임']::text[], ARRAY['기억력 (Memory)','운걸기 (Push Your Luck)','의사소통 제한 (Communication Limits)','팀 기반 게임 (Team-Based Game)']::text[], 2015, '164356810346560_lg.jpg', 'https://youtu.be/pPYGAV8MtSM?si=hHN-Gw6mmpwvRPNM', '영문판', false, '{}'::text[]),
+  ('코드네임 : 픽처스', 'Codenames : Pictures', true, '{2,3,4,5,6,7,8}', '{4}', 6, false, 15, 15, 1.23, ARRAY['파티']::text[], ARRAY['디덕션 (추론)','스파이','카드 게임','파티 게임']::text[], ARRAY['기억력 (Memory)','운걸기 (Push Your Luck)','의사소통 제한 (Communication Limits)','팀 기반 게임 (Team-Based Game)']::text[], 2016, '1643582835579589_lg.jpg', 'https://youtu.be/pPYGAV8MtSM?si=hHN-Gw6mmpwvRPNM', '영문판', false, '{}'::text[]),
+  ('콘셉트', 'Concept', true, '{4,5,6,7,8,9,10}', '{7}', 6, true, 40, 40, 1.38, ARRAY['파티']::text[], ARRAY['단어 게임','디덕션 (추론)','파티 게임']::text[], ARRAY['의사소통 제한 (Communication Limits)','팀 기반 게임 (Team-Based Game)']::text[], 2013, '1755565579-122288.png', 'https://youtu.be/aqZskA4OBEI?si=BVPlPvWUSE8j_s9e', '영문판', false, '{}'::text[]),
+  ('쿠', 'Coup', true, '{2,3,4,5,6}', '{5}', 4, false, 15, 15, 1.41, ARRAY['파티']::text[], ARRAY['디덕션 (추론)','블러핑','정치','카드 게임','파티 게임']::text[], ARRAY['기억력 (Memory)','비공개 역할 (Hidden Roles)','빼앗기 (Take That)','플레이어 제거 (Player Elimination)','플레이어별 특수능력 (Variable Player Powers)']::text[], 2012, '1709917900-215952.jpg', 'https://youtu.be/6Q7BoHGxi38?si=CJKeak36rW7mWz9w', null, false, '{}'::text[]),
+  ('쿠키런 러브레터', 'Cookie Run : Love Letter', true, '{2,3,4,5,6}', '{3}', 4, false, 10, 20, 1.1, ARRAY['패밀리']::text[], ARRAY['카드 게임']::text[], ARRAY['플레이어 제거 (Player Elimination)','핸드 관리 (Hand Management)']::text[], 2022, '1665714777575332_lg.jpg', 'https://youtu.be/30CgnqVaGGQ?si=yS9BZz8e-rvhtmwV', null, false, '{}'::text[]),
+  ('쿠페레이션', 'Couperation', true, '{2,3,4}', '{2}', 4, false, 15, 15, 2, ARRAY['패밀리']::text[], ARRAY['카드 게임']::text[], ARRAY['패턴 빌딩 (Pattern Building)','핸드 관리 (Hand Management)','협력 게임 (Cooperative Game)']::text[], 2018, '1685295966086193_lg.jpg', 'https://youtu.be/cJTfqqyZvQ8?si=PgTVfMwyU5jJpgvM', null, false, '{}'::text[]),
+  ('쿼리도 미니', 'Quoridor Mini', true, '{2,3,4}', '{4}', 2, false, 15, 15, 1.82, ARRAY['추상']::text[], ARRAY['미로','어린이','추상전략']::text[], ARRAY['그리드 이동 (Grid Movement)','레이스 (Race)','연결 (Connections)','정사각형 그리드 (Square Grid)']::text[], 1997, '1643793869343941_lg.jpg', 'https://youtu.be/SQS6h7W5l2c?si=IwmHBmiTlB9KDPd-', '박스 손상됨', false, '{}'::text[]),
+  ('클루', 'Clue', true, '{2,3,4,5,6}', '{3}', 4, false, 40, 40, 1.64, ARRAY['패밀리']::text[], ARRAY['디덕션 (추론)','블러핑','살인 / 미스터리']::text[], ARRAY['롤/스핀 및 이동 (Roll / Spin and Move)','주사위 굴림 (Dice Rolling)']::text[], 2012, '164382804844724_lg.jpg', 'https://youtu.be/fov3pMQS3fQ?si=a94lxSLrUpJWBX-b', '박스 손상되어 파일케이스 처리', false, '{}'::text[]),
+  ('타코 백 고트 치즈 피자', 'Taco Cat Goat Cheese Pizza', true, '{2,3,4,5,6,7,8}', '{3}', 4, false, 10, 30, 1.04, ARRAY['파티']::text[], ARRAY['덱스터리티 (손재주)','어린이','파티 게임','행동']::text[], ARRAY['레이스 (Race)','실시간 (Real-Time)','패턴 인식 (Pattern Recognition)']::text[], 2018, '1687286142328488_lg.jpg', 'https://youtu.be/8prNC1sx-RE?si=-MdPVVJal3soTQ8V', null, false, '{}'::text[]),
+  ('타코 캣 고트 치즈 피자 : 워터프루프', 'Taco Cat Goat Cheese Pizza : Water Proof Edition', true, '{2,3,4,5,6,7,8}', '{4}', 5, false, 15, 30, 1.04, ARRAY['파티']::text[], ARRAY['덱스터리티 (손재주)','파티 게임','행동']::text[], ARRAY['동시 액션 선택 (Simultaneous Action Selection)','실시간 (Real-Time)','패턴 인식 (Pattern Recognition)']::text[], 2025, 'L.jpeg', 'https://youtu.be/8prNC1sx-RE?si=-MdPVVJal3soTQ8V', null, false, '{}'::text[]),
+  ('탑텐 TV', 'Top Ten TV', true, '{4,5,6,7,8,9}', '{5}', 6, false, 30, 30, 1.07, ARRAY['파티']::text[], ARRAY['파티 게임']::text[], ARRAY['협력 게임 (Cooperative Game)']::text[], 2020, '1644385462731291_lg.jpg', 'https://youtu.be/sx0xISPMgEw?si=63pbRWoNznHTVhTB', null, false, '{}'::text[]),
+  ('텔레스트레이션', 'Telestrations', true, '{4,5,6,7,8}', '{6}', 8, false, 30, 30, 1.07, ARRAY['파티']::text[], ARRAY['실시간','유머','파티 게임']::text[], ARRAY['스토리텔링 (Storytelling)','종이와 펜 (Paper-and-Pencil)']::text[], 2009, '1612776506-940790.jpg', 'https://youtu.be/Puc_1XyP-30?si=_o4P_iKJWrWv8C3m', null, false, '{}'::text[]),
+  ('티켓 투 라이드 : 유럽', 'Ticket to Ride : Europe', true, '{2,3,4,5}', '{3}', 4, false, 30, 60, 1.92, ARRAY['패밀리']::text[], ARRAY['기차']::text[], ARRAY['게임 종료 보너스 (End game bonuses)','네트워크 및 경로 구축 (Network and Route Building)','셋 컬렉션 (Set Collection)','연결 (Connections)','오픈 드래프팅 (Open Drafting)','운걸기 (Push Your Luck)','핸드 관리 (Hand Management)']::text[], 2005, '1641055353-524302.png', 'https://youtu.be/_bDJg7wQ3Fg?si=93Vq0SE0kpLrPu8J', null, false, '{}'::text[]),
+  ('판타스틱', 'FantaSticks!', true, '{2,3,4,5,6}', '{4}', 5, false, 20, 20, 1, ARRAY['어린이','패밀리']::text[], ARRAY['상식','행동']::text[], ARRAY['패턴 빌딩 (Pattern Building)']::text[], 2015, '1705735270977378_lg.jpg', 'https://youtu.be/K4V1cRSDDHM?si=ziPvfIhKLxOaTmTd', null, false, '{}'::text[]),
+  ('퍼스트 콘택트', 'First Contact', true, '{2,3,4,5,6,7}', '{4}', 6, false, 15, 40, 2, ARRAY['파티']::text[], ARRAY['SF 공상 과학','단어 게임','디덕션 (추론)','카드 게임','파티 게임']::text[], ARRAY['동시 액션 선택 (Simultaneous Action Selection)','의사소통 제한 (Communication Limits)','추론 (Deduction)','팀 기반 게임 (Team-Based Game)']::text[], 2018, '16441374827622_lg.png', 'https://youtu.be/GkKx4MDgFpo?si=1DJfhl0z4j5hCLPv', null, false, '{}'::text[]),
+  ('펭귄 파티 미니', 'Penguin Party Mini', true, '{2,3,4,5,6}', '{3}', 4, false, 15, 15, 1.11, ARRAY['패밀리']::text[], ARRAY['동물','어린이','카드 게임']::text[], ARRAY['핸드 관리 (Hand Management)']::text[], 2008, '1718072206-769326.jpg', 'https://youtu.be/hBG7zaHsn20?si=eTH6X3stdqfRg8NR', null, false, '{}'::text[]),
+  ('포인트 샐러드', 'Point Salad', true, '{2,3,4,5,6}', '{2}', 3, false, 15, 30, 1.15, ARRAY['패밀리']::text[], ARRAY['카드 게임']::text[], ARRAY['셋 컬렉션 (Set Collection)','오픈 드래프팅 (Open Drafting)']::text[], 2019, '1615273853-351749.jpg', 'https://youtu.be/rAN1Z8cb5XI?si=H1nluZ-gZn6VsaqO', null, false, '{}'::text[]),
+  ('피에스타', 'Fiesta de los Muertos', true, '{4,5,6,7,8}', '{4}', 7, false, 15, 15, 1.1, ARRAY['파티']::text[], ARRAY['단어 게임','디덕션 (추론)','파티 게임']::text[], ARRAY['의사소통 제한 (Communication Limits)','협력 게임 (Cooperative Game)']::text[], 2019, '1649249786968219_lg.jpg', 'https://youtu.be/Q1IWriOHNPQ?si=ESyNWAkhgH96ZY9-', null, false, '{}'::text[]),
+  ('피카마우스', 'Peek-a-Mouse', true, '{2,3,4,5,6}', '{2}', 4, false, 20, 20, 1, ARRAY['어린이']::text[], ARRAY['기억력','어린이']::text[], ARRAY['기억력 (Memory)','실시간 (Real-Time)','협력 게임 (Cooperative Game)']::text[], 2020, '1706805755694693_lg.jpg', 'https://youtu.be/g-gGOzfDVJo?si=ljSUmS3Pu0_-fo7E', null, false, '{}'::text[]),
+  ('하체도 하셔야죠', 'Don''t Skip Leg Day', true, '{3,4,5,6}', '{5}', 4, false, 15, 25, 1, ARRAY['파티']::text[], ARRAY['카드 게임']::text[], ARRAY['동시 액션 선택 (Simultaneous Action Selection)','셋 컬렉션 (Set Collection)','핸드 관리 (Hand Management)']::text[], 2024, '1739425959-864268.png', 'https://youtu.be/n7OZwroaUBA?si=53I8O0_yewm7BT6G', null, false, '{}'::text[]),
+  ('한밤의 늑대인간', 'One Night Ultimate Werewolf', true, '{3,4,5,6,7,8,9,10}', '{5}', 6, true, 10, 10, 1.38, ARRAY['파티']::text[], ARRAY['디덕션 (추론)','블러핑','카드 게임']::text[], ARRAY['배신자 게임 (Traitor Game)','비공개 역할 (Hidden Roles)','투표 (Voting)','플레이어별 특수능력 (Variable Player Powers)']::text[], 2014, '1643577984726039_lg.jpg', 'https://youtu.be/BwA9qH_kyDw?si=3sQn6E3ndg-Wa_5D', null, false, '{}'::text[]),
+  ('할리갈리 딜럭스', 'Halli Galli Deluxe', true, '{2,3,4,5,6,7}', '{5}', 4, false, 10, 20, 1.02, ARRAY['패밀리']::text[], ARRAY['실시간','카드 게임','행동']::text[], ARRAY['패턴 인식 (Pattern Recognition)','플레이어 제거 (Player Elimination)']::text[], 2006, '할리갈리.jpg', 'https://youtu.be/pBgbKmbIK6c?si=YvGjirQ1UgQQR6lq', null, false, '{}'::text[]),
+  ('해저탐험', 'Deep Sea Adventure', true, '{2,3,4,5,6}', '{3}', 4, false, 30, 30, 1.18, ARRAY['패밀리']::text[], ARRAY['주사위','탐험','항해']::text[], ARRAY['롤/스핀 및 이동 (Roll / Spin and Move)','운걸기 (Push Your Luck)','특정 상품 운송 (Pick-up and Deliver)']::text[], 2014, '168063155848566_lg.jpg', 'https://youtu.be/HfdVQ5uqbYQ?si=28y3KqBhTFbXrtQh', null, false, '{}'::text[]),
+  ('휘슬 마운틴', 'Whistle Mountain', true, '{2,3,4}', '{2}', 3, false, 60, 90, 3.01, ARRAY['전략']::text[], ARRAY['산업 / 제조']::text[], ARRAY['일꾼 놓기 (Worker Placement)','타일 놓기 (Tile Placement)']::text[], 2020, 'Cap_2021-08-18_08-26-07-325.jpg', 'https://youtu.be/tQR2x-ng1Vo?si=ICqeOz5AuAr400sy', null, false, '{}'::text[]),
+  ('모노폴리 쿠키런 : 킹덤', 'MONOPOLY Cookie Run : Kingdom', true, '{2,3,4,5,6}', '{3}', 4, false, 60, 180, 1.62, ARRAY['패밀리']::text[], ARRAY['경제']::text[], ARRAY['거래 (Trading)','경매/입찰 (Auction/Bidding)','대출 (Loans)','셋 컬렉션 (Set Collection)','수입 (income)','주사위 굴림 (Dice Rolling)','주식 보유 (Stock Holding)']::text[], 2023, '모노폴리_쿠키런_킹덤.jpg', 'https://youtu.be/Elk95Cvsxyw?si=6nvB5L4T6f8mguJD', null, false, '{}'::text[]),
+  ('태그 팀', 'Tag Team', true, '{2}', '{2}', 2, false, 10, 10, 2.07, ARRAY['전략']::text[], ARRAY['전투','카드 게임','판타지']::text[], ARRAY['덱 구성 (Deck Construction)','오픈 드래프팅 (Open Drafting)','플레이어별 특수능력 (Variable Player Powers)','핸드 관리 (Hand Management)']::text[], 2025, '태그팀.jpg', 'https://youtu.be/SilcOQiYoWI?si=jaNq8oOJCu5iRQp2', null, false, '{}'::text[]),
+  ('똑딱! 스피드 퀴즈', 'Tilt N Shout', true, '{2,4,6,8,10}', '{4}', 6, true, 10, 10, 1, ARRAY['파티']::text[], ARRAY['상식','행동']::text[], ARRAY['3차원 이동 (Three Dimensional Movement)','액션 타이머 (Action Timer)']::text[], 2024, '똑딱_스피드퀴즈.png', 'https://youtu.be/wD9vl4-29xU?si=c5ScSI62i0GLGn-_', null, false, '{}'::text[]),
+  ('클러스터 듀오', 'Kluster Duo', true, '{2}', '{2}', 2, false, 10, 20, 1, ARRAY['파티']::text[], ARRAY['추상전략','행동']::text[], ARRAY['맵 변형 (Map Deformation)','지역 최다 / 영향력 (Area Majority / Influence)']::text[], 2023, '클러스터_듀오.jpg', 'https://youtu.be/kaOJierDkDM?si=yYA0kQ-SKL7KYEah', null, false, '{}'::text[]),
+  ('파우스트 VS 메피스토', 'Faust VS Mephisto', true, '{2}', '{2}', 2, false, 10, 25, 2, ARRAY['테마']::text[], ARRAY['소설','카드 게임']::text[], ARRAY['트릭-테이킹 (Trick-taking)','핸드 관리 (Hand Management)']::text[], 2025, '파우스트_대_메피스토.png', 'https://youtu.be/EZBMMrOYMUM?si=ND3SzXM22gmwhoSm', null, false, '{}'::text[]),
+  ('좋은놈 , 나쁜놈 , 그리고 염소', 'The Good , The Bad , And The Goat', true, '{2,3,4,5}', '{4}', 3, false, 30, 45, 2, ARRAY['파티']::text[], ARRAY['블러핑']::text[], ARRAY['셋 컬렉션 (Set Collection)','플레이어별 특수능력 (Variable Player Powers)','핸드 관리 (Hand Management)']::text[], 2025, '놈놈_염소.jpg', 'https://youtu.be/YdwlvPujG8o?si=P1f3qV9SlAuSZmow', null, false, '{}'::text[]),
+  ('캐슬 콤보', 'Castle Combo', true, '{2,3,4,5}', '{4}', 2, false, 10, 25, 1.74, ARRAY['패밀리']::text[], ARRAY['중세','카드 게임']::text[], ARRAY['오픈 드래프팅 (Open Drafting)']::text[], 2024, '캐슬콤보.png', 'https://youtu.be/1lPp-KzM3tE?si=LDur8zg93dCEpF-S', null, false, '{}'::text[]),
+  ('이 개 누구개?', 'Name It !', true, '{2,3,4,5,6}', '{4}', 5, false, 15, 15, 1.5, ARRAY['패밀리']::text[], ARRAY['기억력','실시간','어린이']::text[], ARRAY['기억력 (Memory)','실시간 (Real-Time)','임펄스 무브먼트 (Impulse Movement)']::text[], 2025, '이개누구개.png', 'https://youtu.be/_S5tPSg8UBE?si=wfhVr4KNtuRslbHL', null, false, '{}'::text[]),
+  ('12 칩 트릭', '12 Chip Trick', true, '{2,3,4}', '{2}', 3, false, 20, 20, 1.55, ARRAY['패밀리']::text[], ARRAY['가족']::text[], ARRAY['트릭-테이킹 (Trick-taking)']::text[], 2022, '12칩트릭.jpg', 'https://youtu.be/Lh5_xE2ODno?si=O0XhHnWqay1IXs1J', null, false, '{}'::text[]),
+  ('수상한 생선들', 'Sounds Fishy', true, '{4,5,6,7,8}', '{5}', 7, false, 30, 30, 1, ARRAY['파티']::text[], ARRAY['파티 게임']::text[], ARRAY['배팅과 블러핑 (Betting and Bluffing)','플레이어 심판 (Player Judge)']::text[], 2022, '수상한생선들.png', 'https://youtu.be/HR_uDIJxQTE?si=doOP_-Jg2ucHCFpR', null, false, '{}'::text[]),
+  ('오딘', 'Odin', true, '{2,3,4,5,6}', '{3}', 4, false, 15, 15, 1.2, ARRAY['패밀리']::text[], ARRAY['카드 게임']::text[], ARRAY['사다리 타기 (Ladder Climbing)']::text[], 2024, '오딘.png', 'https://youtu.be/4tASz0ZoiLE?si=SdOjX2DbsSKGcZOa', '오딘에서는 가능한 한 빨리 손에 든 카드를 비워 모든 바이킹을 세상으로 내보내는 것이 목표입니다.게임은 여러 번의 핸드로 진행되며, 각 핸드는 하나 이상의 라운드로 구성됩니다. 덱은 6가지 슈트(suit)로 구성되어 있으며, 각 슈트는 1부터 9까지 번호가 매겨져 있습니다. 각 플레이어는 9장의 카드로 게임을 시작합니다.선 플레이어는 테이블에 한 장의 카드를 내려놓습니다. 다음 플레이어는 패스하거나(추후 턴에 다시 플레이 가능) 선 플레이어와 같은 수의 카드(또는 그보다 한 장 더 많은 카드)를 더 높은 가치로 플레이합니다. 두 장 이상의 카드를 플레이할 때, 카드들은 같은 숫자나 색상이어야 하며, 이 카드들의 가치는 숫자를 높은 것부터 낮은 순서로 배열하여 결정됩니다. 예를 들어, 파란색 3과 파란색 6을 플레이한다면, 그 가치는 36이 아닌 63입니다. 선 플레이어가 아닌 상태에서 카드를 플레이할 때는 이전에 플레이된 카드 중 한 장을 손으로 가져와야 하며, 나머지 카드는 버립니다.게임은 플레이어 중 한 명이 카드를 모두 사용하여 라운드가 즉시 종료되거나, 모든 플레이어가 연속으로 패스할 때까지 계속됩니다. 후자의 경우, 마지막으로 플레이된 카드를 버리고, 이 카드를 플레이한 사람이 새로운 라운드를 시작하기 위해 한 장의 카드를 내려놓습니다. 또는, 선 플레이어가 같은 슈트나 숫자의 카드만 손에 갖고 있다면, 이 모든 카드를 한 번에 플레이하여 핸드를 종료할 수 있습니다. 핸드가 끝나면, 각 플레이어는 아직 손에 갖고 있는 카드 한 장당 1점을 받습니다.어떤 플레이어도 15점 이상을 갖지 않았다면, 덱을 섞고 새로운 핸드를 시작합니다. 만약 누군가 15점 이상을 가지고 있다면, 가장 적은 점수를 가진 플레이어가 승리합니다.', false, '{}'::text[]),
+  ('플립 7', 'Flip 7', true, '{3,4,5,6,7,8,9,10}', '{3}', 5, true, 20, 20, 1.04, ARRAY['파티']::text[], ARRAY['카드 게임']::text[], ARRAY['운걸기 (Push Your Luck)']::text[], 2024, '플립7.jpg', 'https://youtu.be/H9ghNlYbI-w?si=J2UlFkrDpX2G5NIs', null, false, '{}'::text[]),
+  ('펜토리니', 'Pentorini', true, '{1,2}', '{1}', 1, false, 10, 60, 2, ARRAY['추상']::text[], ARRAY['퍼즐']::text[], ARRAY['솔로/솔로테어 게임 (Solo / Solitaire Game)']::text[], 2025, '펜토리니.jpg', 'https://youtu.be/VW6TcxEf2lA?si=1RjMT0at7Jhrj3Gn', null, false, '{}'::text[]),
+  ('다함께 쿠키요미 : 궁극의 이지선다', 'Everyone Read the Air: The Ultimate Two Choice', true, '{3,4,5,6,7,8}', '{6}', 5, false, 10, 20, 1, ARRAY['파티']::text[], ARRAY['파티 게임']::text[], ARRAY['투표 (Voting)']::text[], 2024, '쿠키요미.jpg', 'https://youtu.be/zNnaQzKJVGg?si=S5vlfMA_uW85L92u', null, false, '{}'::text[]),
+  ('냥냥집사', 'Meow Meow Dice', false, '{2,3,4}', '{2}', 4, false, 10, 20, 1, ARRAY['파티']::text[], ARRAY['고양이','파티 게임']::text[], ARRAY['셋 컬렉션 (Set Collection)','주사위 굴림 (Dice Rolling)']::text[], 2024, '냥냥집사.jpg', 'https://youtu.be/trJnewoVImk?si=_-3wnnStfO4e8gw-', null, false, '{}'::text[]),
+  ('캐치 스캐치', 'Catch Sketch', true, '{3,4,5,6}', '{4}', 5, false, 20, 20, 1, ARRAY['파티']::text[], ARRAY['실시간','유머','파티 게임']::text[], ARRAY['종이와 펜 (Paper-and-Pencil)']::text[], 2022, 'image 79.png', 'https://youtu.be/GhKUtyZ-3Ng?si=Pd0T5gWXoB_SdMF4', null, false, '{}'::text[]),
+  ('피드 더 크라켄', 'Feed the Kraken', true, '{5,6,7,8,9,10}', '{6}', 8, true, 45, 90, 2.14, ARRAY['테마','파티']::text[], ARRAY['디덕션 (추론)','미니어처','카드 게임','항해','해적']::text[], ARRAY['그리드 이동 (Grid Movement)','롤플레잉 (Role Playing)','배신자 게임 (Traitor Game)','배팅과 블러핑 (Betting and Bluffing)','연기 (Acting)','투표 (Voting)','팀 기반 게임 (Team-Based Game)','플레이어별 특수능력 (Variable Player Powers)']::text[], 2021, 'image 80.png', 'https://youtu.be/GOKGVHLj_y4?si=sj1Kj0po_-fHVVlb', null, false, '{}'::text[]),
+  ('블랭캣', 'Blancat', true, '{2,3,4}', '{3}', 4, false, 20, 20, 1, ARRAY['파티']::text[], ARRAY['동물','실시간']::text[], ARRAY['스피드 매칭 (Speed Matching)','패턴 인식 (Pattern Recognition)']::text[], 2025, 'image 81.png', 'https://youtu.be/mYtsQCol7N8?si=am1QnptK5IsSJx-O', null, false, '{}'::text[]),
+  ('차가운 그녀가 눈을 뜨기 전에', 'Embalming Girl', true, '{3,4,5,6}', '{4}', 5, false, 10, 10, 1.67, ARRAY['테마']::text[], ARRAY['공포','살인 / 미스터리','카드 게임']::text[], ARRAY['준협력 게임 (Semi-Cooperative Game)','추론 (Deduction)']::text[], 2020, 'image 82.png', 'https://youtu.be/4z0BzSo03zo?si=V2rxmvVOjOMdEyr4', null, false, '{}'::text[]),
+  ('육식동물 짓이야 !', 'A Carnivore Did It !', true, '{1,2,3,4,5}', '{2}', 3, false, 20, 20, 1, ARRAY['파티']::text[], ARRAY['디덕션 (추론)']::text[], ARRAY['시나리오/미션/캠페인 게임 (Scenario / Mission / Campaign Game)','추론 (Deduction)','협력 게임 (Cooperative Game)']::text[], 2025, 'image 83.png', 'https://youtu.be/BAqlDDypbjs?si=kpnKBsNOaID2q1NB', null, false, '{}'::text[]),
+  ('재치와 눈치', 'Wits & Wagers Family', true, '{3,4,5,10}', '{3}', 5, true, 20, 20, 1.09, ARRAY['파티','패밀리']::text[], ARRAY['교육','상식','파티 게임']::text[], ARRAY['배팅과 블러핑 (Betting and Bluffing)','종이와 펜 (Paper-and-Pencil)']::text[], 2010, 'image 84.png', 'https://youtu.be/eWAtY8EJx0U?si=SLA8fDAP7NjP6v4S', null, false, '{}'::text[]),
+  ('플립툰즈', 'FlipToons', true, '{1,2,3,4}', '{3}', 4, false, 20, 20, 1.74, ARRAY['패밀리']::text[], ARRAY['동물','영화 / TV / 라디오','카드 게임']::text[], ARRAY['덱 구성 (Deck Construction)','시장 (Market)','오픈 드래프팅 (Open Drafting)','자원 승점 (Victory Points as a Resource)','점수 계산 및 리셋 게임 (Score-and-Reset Game)']::text[], 2025, 'image 85.png', 'https://youtu.be/K1NkwkkJlM4?si=lLpCOJjVMIjsZjqT', null, false, '{}'::text[]),
+  ('태양신 라 아크릴 에디션', 'Ra', false, '{2,3,4,5}', '{5}', 4, false, 45, 60, 2.31, ARRAY['전략']::text[], ARRAY['고대','신화']::text[], ARRAY['경매/입찰 (Auction/Bidding)','경매: 한 번의 입찰 (Auction: Once Around)','비공개 승점 (Hidden Victory Points)','셋 컬렉션 (Set Collection)','운걸기 (Push Your Luck)','제한된 입찰 (Constrained Bidding)','폐쇄경제 경매 (Closed Economy Auction)']::text[], 2026, 'image 86.png', 'https://youtu.be/IDEkq7cnVwE?si=K-tpn-afH3kIuuIY', '2026년 8월 발송 예정', false, '{}'::text[]),
+  ('엔데버 : 심해', 'Endeavor : Deep Sea', false, '{1,2,3,4,5}', '{2}', 3, false, 60, 120, 2.9, ARRAY['전략']::text[], ARRAY['탐험','항해','환경']::text[], ARRAY['맵 추가 (Map Addition)','솔로/솔로테어 게임 (Solo / Solitaire Game)','액션 포인트 (Action Points)','체이닝 (Chaining)','테크 트리 / 테크 트랙 (tech trees / tech tracks)']::text[], 2024, 'image 87.png', 'https://youtu.be/ibmYd5YuZdE?si=ZBO6UMX9w6gCycff', null, false, '{}'::text[]),
+  ('승리의 여신 : 니케', 'Goddess of Victory: NIKKE', true, '{2,3,4}', '{4}', 3, false, 30, 60, 1, ARRAY['테마']::text[], ARRAY['SF 공상 과학','워게임','카드 게임']::text[], ARRAY['주사위 굴림 (Dice Rolling)','준협력 게임 (Semi-Cooperative Game)','카드 능력 사용 (Card Ability)','카드 드래프팅 (Card Drafting)']::text[], 2026, 'image 88.png', 'https://youtu.be/yDV3xsfsXUs?si=SYP-60UyYiUjMN8s', '2026년 8월 발송 예정', false, '{}'::text[]),
+  ('디텍티브 : 천사들의 도시', 'Detective : City Of Angels', false, '{1,2,3,4,5}', '{1}', 3, false, 30, 150, 2.37, ARRAY['테마']::text[], ARRAY['살인 / 미스터리']::text[], ARRAY['배신자 게임 (Traitor Game)','액션 포인트 (Action Points)','지역 이동 (Area Movement)','팀 기반 게임 (Team-Based Game)','협력 게임 (Cooperative Game)']::text[], 2019, 'image 89.png', 'https://youtu.be/YqxV3Esx2UA?si=Dbv-2F9ZegLK_fk6', '2027년 10월 발송 예정', false, '{}'::text[]),
+  ('야단법석 달리기', 'Magical Athlete', true, '{2,3,4,5,6}', '{4}', 6, false, 30, 30, 1.27, ARRAY['파티','패밀리']::text[], ARRAY['레이싱','주사위']::text[], ARRAY['레이스 (Race)','롤/스핀 및 이동 (Roll / Spin and Move)','플레이어별 특수능력 (Variable Player Powers)']::text[], 2025, 'image 90.png', 'https://youtu.be/yFpRqW8xDrE?si=Nk_niEof5IcDFuaS', null, false, '{}'::text[]),
+  ('독수리 눈치 싸움', 'What the Heck ?', true, '{2,3,4,5}', '{3}', 5, false, 20, 20, 1.16, ARRAY['패밀리']::text[], ARRAY['동물','블러핑','카드 게임']::text[], ARRAY['경매/입찰 (Auction/Bidding)','동시 액션 선택 (Simultaneous Action Selection)']::text[], 1988, 'image 91.png', 'https://youtu.be/XmUclwC-2NE?si=37lAelxjjo2CA3fv', null, false, '{}'::text[]),
+  ('해녀', 'Sea Divers of Jeju', true, '{2,3,4,5}', '{4}', 5, false, 30, 30, 1, ARRAY['파티']::text[], ARRAY['교육','카드 게임','환경']::text[], ARRAY['동시 액션 선택 (Simultaneous Action Selection)','운걸기 (Push Your Luck)','일꾼 놓기 (Worker Placement)']::text[], 2026, 'image 92.png', 'https://youtu.be/trvQ9mXYaYI?si=CXAYqwg-Wr-NmPU_', null, false, '{}'::text[]),
+  ('돈키호테', 'Don Quixote', true, '{3,4,5}', '{5}', 4, false, 20, 20, 1, ARRAY['파티']::text[], ARRAY['소설','중세','카드 게임']::text[], ARRAY['트릭-테이킹 (Trick-taking)']::text[], 2026, 'image 93.png', 'https://youtu.be/guW1zuWWCMk?si=ANfmRfsCgbdrRPCJ', null, false, '{}'::text[]),
+  ('블리츠', 'Blitz', true, '{3,4,5,6}', '{4}', 5, false, 30, 30, 1.04, ARRAY['파티']::text[], ARRAY['단어 게임','상식','실시간','파티 게임']::text[], ARRAY['스피드 매칭 (Speed Matching)','패턴 인식 (Pattern Recognition)']::text[], 2010, 'image 94.png', 'https://youtu.be/j9nMGPn-Fxk?si=ZP4wTapaP0zafo02', null, false, '{}'::text[]),
+  ('에이스 오브 스페이드', 'Ace of Spades', true, '{1,2}', '{2}', 1, false, 40, 45, 2.5, ARRAY['전략']::text[], ARRAY['카드 게임']::text[], ARRAY['솔로/솔로테어 게임 (Solo / Solitaire Game)','핸드 관리 (Hand Management)','협력 게임 (Cooperative Game)']::text[], 2026, 'image 95.png', 'https://youtu.be/b98EDCpMI3Q?si=GGdjzQ4ReAwi-4Vk', null, false, '{}'::text[]),
+  ('셀레스티아 빅 박스', 'Celestia : Big Box', true, '{2,3,4,5,6}', '{4}', 5, false, 30, 30, 1.32, ARRAY['패밀리']::text[], ARRAY['모험','카드 게임','판타지','항공 / 비행']::text[], ARRAY['배팅과 블러핑 (Betting and Bluffing)','비공개 승점 (Hidden Victory Points)','운걸기 (Push Your Luck)','주사위 굴림 (Dice Rolling)']::text[], 2015, 'image 96.png', 'https://youtu.be/Gv449Uv72nc?si=UvX_k8keOVZAO9AK', '39200원 매트 포함', false, '{}'::text[]),
+  ('렉시오', 'LEXIO', true, '{3,4,5}', '{3}', 5, false, 20, 20, 1.92, ARRAY['전략','패밀리']::text[], ARRAY['수학']::text[], ARRAY['사다리 타기 (Ladder Climbing)','트릭-테이킹 (Trick-taking)','핸드 관리 (Hand Management)']::text[], 2004, 'image 97.png', 'https://youtu.be/pgP_Ec8X8Pg?si=gIqDpYMMhf_iKZcB', null, false, '{}'::text[]),
+  ('라스베가스', 'Las Vegas', true, '{2,3,4,5}', '{3}', 4, false, 30, 30, 1.17, ARRAY['패밀리']::text[], ARRAY['주사위']::text[], ARRAY['주사위 굴림 (Dice Rolling)','지역 최다 / 영향력 (Area Majority / Influence)']::text[], 2012, 'image 98.png', 'https://youtu.be/Bt2escpWj8Q?si=YcRimN3lqWoxVamL', null, false, '{}'::text[]),
+  ('익스플로딩 키튼 : 좀비 키튼', 'Exploding Kittens : Zombie Kittens', true, '{2,3,4,5}', '{3}', 4, false, 15, 15, 1.24, ARRAY['파티']::text[], ARRAY['공포','동물','유머','좀비','카드 게임']::text[], ARRAY['뜨거운 감자 (Hot Potato)','운걸기 (Push Your Luck)','핸드 관리 (Hand Management)']::text[], 2022, 'image 99.png', 'https://youtu.be/LRFzqevwRnw?si=l84uv4zMZfeRGyQQ', null, false, '{}'::text[]),
+  ('피 아이', 'P.I.', true, '{2,3,4,5}', '{4}', 3, false, 45, 60, 2.23, ARRAY['패밀리']::text[], ARRAY['디덕션 (추론)','미스터리 (추리)','살인 / 미스터리']::text[], ARRAY['오픈 드래프팅 (Open Drafting)','조립 보드 (Modular Board)','추론 (Deduction)','타일 놓기 (Tile Placement)']::text[], 2012, 'image 100.png', 'https://youtu.be/sLeeM9P-Gx4?si=cEywD2imw1cgv-81', '2026년 12월 발송 예정', false, '{}'::text[]),
+  ('죄수들의 밤', 'Prisoner’s Night', true, '{3,4,5,6}', '{5}', 6, false, 30, 30, 1, ARRAY['파티']::text[], ARRAY['디덕션 (추론)','마피아']::text[], ARRAY['마피아 (Mafia)','추론 (Deduction)']::text[], 2022, 'image 101.png', 'https://youtu.be/6KzF9XLcNqo?si=2D5CS3cYmadVgsWH', null, false, '{}'::text[]),
+  ('핸즈 업', 'Hands Up !', true, '{3,4,5,6,7,8}', '{4}', 8, false, 20, 20, 1.84, ARRAY['파티','패밀리']::text[], ARRAY['실시간','카드 게임','파티 게임']::text[], ARRAY['연기 (Acting)','패턴 인식 (Pattern Recognition)']::text[], 2015, 'image 102.png', 'https://youtu.be/z6rNQKqtP6I?si=jYS92OziVsTZhFbg', null, false, '{}'::text[]),
+  ('스시팡', 'Sushi Panic !', true, '{1,2,3,4}', '{3}', 4, false, 15, 15, 1, ARRAY['패밀리']::text[], ARRAY['행동']::text[], ARRAY['실시간 (Real-Time)']::text[], 2009, 'image 103.png', 'https://youtu.be/RaFNrPpjDp4?si=qL_MYbdfud4Jk7qq', null, false, '{}'::text[]),
+  ('시타델', 'Citadels', true, '{2,3,4,5,6,7,8}', '{4}', 5, false, 30, 60, 2.3, ARRAY['패밀리']::text[], ARRAY['도시 건설','블러핑','중세','카드 게임']::text[], ARRAY['단계 순서 변화 (Variable Phase Order)','셋 컬렉션 (Set Collection)','수입 (income)','액션 드래프팅 (Action Drafting)','오픈 드래프팅 (Open Drafting)','차례 상실 (Lose a Turn)','차례 순서: 역할 순서 (Turn Order: Role Order)','플레이어별 특수능력 (Variable Player Powers)']::text[], 2016, 'image 104.png', 'https://youtu.be/o7ZTcbPx1V4?si=XYvHiKJ3J5lGbqR5', '2022 신판', false, '{}'::text[])
+on conflict (title_ko) do update set
+  title_en = excluded.title_en,
+  owned = excluded.owned,
+  player_counts = excluded.player_counts,
+  recommended_counts = excluded.recommended_counts,
+  best_count = excluded.best_count,
+  supports_10_plus = excluded.supports_10_plus,
+  min_playtime = excluded.min_playtime,
+  max_playtime = excluded.max_playtime,
+  weight = excluded.weight,
+  categories = excluded.categories,
+  themes = excluded.themes,
+  mechanics = excluded.mechanics,
+  year_published = excluded.year_published,
+  image_file = excluded.image_file,
+  rule_video_url = excluded.rule_video_url,
+  description = excluded.description,
+  is_estimated = excluded.is_estimated,
+  estimated_fields = excluded.estimated_fields;

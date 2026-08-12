@@ -1,0 +1,12 @@
+# MeePick 웹 서빙 — Synology Container Manager에서 이 파일로 프로젝트 생성.
+# 빌드 산출물(dist/)을 nginx가 읽기 전용으로 서빙한다. 재빌드하면 자동 반영(재시작 불필요).
+services:
+  meepick-web:
+    image: nginx:alpine
+    container_name: meepick-web
+    ports:
+      - "8088:80"
+    volumes:
+      - ../dist:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    restart: unless-stopped
