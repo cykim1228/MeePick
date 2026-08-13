@@ -51,6 +51,15 @@ export default function Root({ children }: PropsWithChildren) {
                 overscroll-behavior: none;
               }
               #root { height: 100%; overflow: hidden; }
+              /* 태블릿 가로(≥1024px — use-breakpoint의 expanded와 같은 기준)는 전체를 10% 키운다.
+                 11인치를 팔 길이 거리에서 보는 보정. 토큰(Typography 등)이 정적 StyleSheet에
+                 박혀 있어 런타임 분기가 안 되므로 웹 셸에서 zoom으로 일괄 확대한다.
+                 폰은 미디어 쿼리 밖이라 그대로이고, 네이티브 빌드와도 무관하다.
+                 브레이크포인트 판정은 창 너비(zoom 무관)라 어긋나지 않고, 그리드 컬럼은
+                 컨테이너 실측이라 확대된 좌표에 맞춰 스스로 적응한다. */
+              @media (min-width: 1024px) {
+                #root { zoom: 1.1; }
+              }
             `,
           }}
         />
