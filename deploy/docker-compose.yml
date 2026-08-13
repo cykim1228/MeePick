@@ -1,11 +1,12 @@
 # MeePick 웹 서빙 — Synology Container Manager에서 이 파일로 프로젝트 생성.
 # 빌드 산출물(dist/)을 nginx가 읽기 전용으로 서빙한다. 재빌드하면 자동 반영(재시작 불필요).
+# 8088은 DSM 역방향 프록시(https 입구)가 쓰므로 컨테이너는 8089에 둔다 — deploy/https.md 참조.
 services:
   meepick-web:
     image: nginx:alpine
     container_name: meepick-web
     ports:
-      - "8088:80"
+      - "8089:80"
     volumes:
       - ../dist:/usr/share/nginx/html:ro
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro

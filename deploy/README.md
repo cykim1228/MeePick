@@ -92,7 +92,7 @@ EXPO_PUBLIC_SUPABASE_ANON_KEY=<publishable 키>
    | 폴더 추가 | `docker/meepick/dist` | `/usr/share/nginx/html` |
    | 파일 추가 | `docker/meepick/nginx.conf` | `/etc/nginx/conf.d/default.conf` |
 
-5. **포트 설정** 탭 → 로컬 포트 `8088` / 컨테이너 포트 `80` / TCP
+5. **포트 설정** 탭 → 로컬 포트 `8089` / 컨테이너 포트 `80` / TCP
 6. 적용 → 실행
 
 > **레지스트리에서 "쿼리 실패"가 뜨면** DSM 7.1의 Docker가 쓰는 Docker Hub 태그 조회 API가
@@ -113,8 +113,11 @@ EXPO_PUBLIC_SUPABASE_ANON_KEY=<publishable 키>
 
 ### 접속
 
-**`http://<NAS주소>:8088`** — 태블릿 브라우저에서 열고 "홈 화면에 추가".
-포트를 바꾸려면 `deploy/nas/docker-compose.yml`의 `8088`(또는 GUI의 로컬 포트)을 수정한다.
+**`http://<NAS주소>:8089`** — 태블릿 브라우저에서 열고 "홈 화면에 추가".
+포트를 바꾸려면 `deploy/nas/docker-compose.yml`의 `8089`(또는 GUI의 로컬 포트)를 수정한다.
+
+주소창 없는 완전한 앱 설치(https)는 [https.md](https.md) — DSM 역방향 프록시가
+`https://<DDNS도메인>:8088`을 이 컨테이너(8089)로 넘겨주는 구성이다.
 
 ## 4. 업데이트 (코드가 바뀌었을 때)
 
@@ -201,8 +204,9 @@ sh /volume1/docker/meepick/backup-supabase.sh
 ## 알아둘 것
 
 - **PWA 완전 설치(주소창 없는 standalone)는 https가 필요하다.** LAN http로는 홈 화면
-  바로가기까지만 된다. 원하면 DSM의 역방향 프록시 + Let's Encrypt 인증서(DSM 내장)로
-  https를 붙일 수 있다 — 필요해지면 요청할 것.
+  바로가기까지만 된다. 절차는 [https.md](https.md) — DDNS + Let's Encrypt + 역방향
+  프록시(8088→8089) + LAN 전용 DNS.
 - NAS가 꺼져 있으면 앱도 안 열린다 (데이터는 클라우드라 무사하다).
 - 표지 이미지·룰 영상은 각각 Supabase Storage·유튜브에서 오므로 인터넷은 필요하다.
-- **쓰기가 anon에 열려 있다.** 8088 포트를 인터넷에 열지 않는다. LAN 안에서만 쓴다.
+- **쓰기가 anon에 열려 있다.** 8088·8089 포트를 라우터에서 포워딩하지 않는다.
+  LAN 안에서만 쓴다.

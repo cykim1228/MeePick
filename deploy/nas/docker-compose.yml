@@ -3,13 +3,16 @@
 # 이 파일과 같은 폴더에 nginx.conf, dist/ 가 함께 있어야 한다.
 # (deploy/publish-nas.ps1 이 세 개를 한꺼번에 밀어 넣는다)
 #
-# Synology Container Manager → 프로젝트 → 생성 → 이 폴더 선택.
+# 입구는 두 개다:
+#   https://<DDNS도메인>:8088  ← DSM 역방향 프록시(인증서 담당)가 8089로 넘긴다. 평소 쓰는 문.
+#   http://<NAS IP>:8089       ← 컨테이너 직결. 프록시 문제 때 비상용.
+# 8088·8089를 라우터에서 포워딩하지 말 것 — MeePick은 LAN 전용이다.
 services:
   meepick-web:
     image: nginx:alpine
     container_name: meepick-web
     ports:
-      - "8088:80"
+      - "8089:80"
     volumes:
       - ./dist:/usr/share/nginx/html:ro
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
