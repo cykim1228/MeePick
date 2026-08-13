@@ -26,6 +26,26 @@ export async function createMember(name: string): Promise<Member> {
 }
 
 /**
+ * 멤버 이름 변경. 반환: Member (갱신된 행).
+ * id가 유지되므로 과거 플레이·우승 기록이 새 이름으로 그대로 따라온다 — 삭제와 달리
+ * 기록이 있어도 안전하다. 오타 수정은 반드시 이쪽으로.
+ */
+export async function renameMember(id: string, name: string): Promise<Member> {
+  const trimmed = name.trim();
+  const { data, error } = await supabase
+    .from('members')
+    .update({ name: trimmed })
+    .eq('id', id)
+    .select('*')
+    .single();
+  if (error) {
+    if (error.code === '23505') throw new Error(`"${trimmed}"은(는) 이미 있는 멤버입니다.`);
+    throw new Error(error.message);
+  }
+  return toMember(data as MemberRow);
+}
+
+/**
  * 멤버 삭제. 플레이 기록에 등장한 멤버는 지우지 않는다 —
  * rounds의 winnerIds가 FK가 아니어서, 지우면 과거 우승 기록이 유령 id가 된다.
  */
@@ -37,7 +57,7 @@ export async function deleteMember(id: string): Promise<void> {
     .limit(1);
   if (checkError) throw new Error(checkError.message);
   if (used && used.length > 0)
-    throw new Error('플레이 기록이 있는 멤버는 삭제할 수 없습니다. 이름이 틀렸다면 새로 추가하세요.');
+    throw new Error('플레이 기록이 있는 멤버는 삭제할 수 없습니다. 이름이 틀렸다면 이름 변경으로 고치세요.');
 
   const { error } = await supabase.from('members').delete().eq('id', id);
   if (error) throw new Error(error.message);

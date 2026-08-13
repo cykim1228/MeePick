@@ -23,11 +23,13 @@ type Props = {
  */
 export function SessionSetup({ initialIds, confirmLabel = '시작하기', onConfirm, onSkip, onClose }: Props) {
   const c = useTheme();
-  const { members, addMember, removeMember, pending, actionError } = useSession();
+  const { members, addMember, removeMember, renameMember, pending, actionError } = useSession();
 
   const [selected, setSelected] = useState<string[]>(initialIds);
   const [newName, setNewName] = useState('');
   const [managing, setManaging] = useState(false);
+  /** 관리 모드에서 편집 중인 멤버. name은 입력 초안이다. */
+  const [editing, setEditing] = useState<{ id: string; name: string } | null>(null);
 
   const toggle = (id: string) =>
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
@@ -40,6 +42,21 @@ export function SessionSetup({ initialIds, confirmLabel = '시작하기', onConf
       setNewName('');
       // 방금 등록한 사람은 오늘 함께할 사람일 가능성이 높다.
       setSelected((prev) => [...prev, member.id]);
+    }
+  };
+
+  const submitRename = async () => {
+    if (!editing || !editing.name.trim()) return;
+    const updated = await renameMember(editing.id, editing.name);
+    if (updated) setEditing(null);
+  };
+
+  const submitDelete = async () => {
+    if (!editing) return;
+    const ok = await removeMember(editing.id);
+    if (ok) {
+      setSelected((prev) => prev.filter((x) => x !== editing.id));
+      setEditing(null);
     }
   };
 
@@ -84,19 +101,59 @@ export function SessionSetup({ initialIds, confirmLabel = '시작하기', onConf
             {members.map((m) => (
               <Chip
                 key={m.id}
-                label={managing ? `✕ ${m.name}` : m.name}
-                selected={!managing && selected.includes(m.id)}
+                label={managing ? `✎ ${m.name}` : m.name}
+                selected={managing ? editing?.id === m.id : selected.includes(m.id)}
                 onPress={() => {
                   if (managing) {
-                    void removeMember(m.id).then((ok) => {
-                      if (ok) setSelected((prev) => prev.filter((x) => x !== m.id));
-                    });
+                    setEditing({ id: m.id, name: m.name });
                   } else {
                     toggle(m.id);
                   }
                 }}
               />
             ))}
+          </View>
+        )}
+
+        {managing && editing && (
+          // key로 멤버 전환 시 입력을 리마운트해 초안·포커스가 이전 멤버 것을 물려받지 않게 한다.
+          <View key={editing.id} style={styles.editBox}>
+            <View style={styles.addRow}>
+              <TextInput
+                value={editing.name}
+                onChangeText={(name) => setEditing((e) => (e ? { ...e, name } : e))}
+                onSubmitEditing={() => void submitRename()}
+                autoFocus
+                placeholder="새 이름"
+                placeholderTextColor={c.textSecondary}
+                style={[
+                  styles.input,
+                  { color: c.text, backgroundColor: c.backgroundElement, borderColor: c.border },
+                ]}
+              />
+              <Pressable
+                onPress={() => void submitRename()}
+                disabled={pending || !editing.name.trim()}
+                accessibilityRole="button"
+                style={[
+                  styles.addButton,
+                  { backgroundColor: c.accent, opacity: pending || !editing.name.trim() ? 0.4 : 1 },
+                ]}>
+                <Text style={[styles.addButtonText, { color: c.onAccent }]}>저장</Text>
+              </Pressable>
+            </View>
+            <View style={styles.editActions}>
+              <Pressable
+                onPress={() => void submitDelete()}
+                disabled={pending}
+                accessibilityRole="button"
+                style={styles.editAction}>
+                <Text style={[styles.hint, { color: c.danger }]}>이 멤버 삭제하기</Text>
+              </Pressable>
+              <Pressable onPress={() => setEditing(null)} accessibilityRole="button" style={styles.editAction}>
+                <Text style={[styles.hint, { color: c.textSecondary }]}>취소</Text>
+              </Pressable>
+            </View>
           </View>
         )}
 
@@ -107,9 +164,15 @@ export function SessionSetup({ initialIds, confirmLabel = '시작하기', onConf
         )}
 
         {members.length > 0 && (
-          <Pressable onPress={() => setManaging((v) => !v)} accessibilityRole="button" style={styles.manageToggle}>
+          <Pressable
+            onPress={() => {
+              setManaging((v) => !v);
+              setEditing(null);
+            }}
+            accessibilityRole="button"
+            style={styles.manageToggle}>
             <Text style={[styles.hint, { color: c.textSecondary }]}>
-              {managing ? '삭제 끝내기' : '멤버 삭제하기'}
+              {managing ? '관리 끝내기' : '멤버 이름 바꾸기·삭제'}
             </Text>
           </Pressable>
         )}
@@ -165,6 +228,9 @@ const styles = StyleSheet.create({
   },
   addButtonText: { ...Typography.body, fontWeight: '600' },
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.two },
+  editBox: { gap: Spacing.one },
+  editActions: { flexDirection: 'row', gap: Spacing.four },
+  editAction: { minHeight: TouchTarget.min, justifyContent: 'center' },
   manageToggle: { alignSelf: 'flex-start', minHeight: TouchTarget.min, justifyContent: 'center' },
   hint: { ...Typography.caption },
   count: { ...Typography.subtitle, marginTop: Spacing.two },

@@ -15,6 +15,7 @@ import {
   fetchMembers,
   fetchPlayHistory,
   logPlay,
+  renameMember,
   startPlay,
   updatePlayMembers,
   updatePlayRounds,
@@ -285,6 +286,20 @@ export function useSession() {
           const member = await createMember(name);
           setStore({ members: [...(store.members ?? []), member].sort((a, b) => a.name.localeCompare(b.name, 'ko')) });
           return member;
+        }),
+      [run]
+    ),
+
+    renameMember: useCallback(
+      (id: string, name: string) =>
+        run(async () => {
+          const updated = await renameMember(id, name);
+          setStore({
+            members: (store.members ?? [])
+              .map((m) => (m.id === id ? updated : m))
+              .sort((a, b) => a.name.localeCompare(b.name, 'ko')),
+          });
+          return updated;
         }),
       [run]
     ),
