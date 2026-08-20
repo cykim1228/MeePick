@@ -5,6 +5,21 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Chip } from '@/components/chip';
 import { GameTimer } from '@/components/game-timer';
 import { Radius, Spacing, TouchTarget, Typography } from '@/constants/theme';
+import { AvalonSheet } from '@/features/game-tools/avalon';
+import { BangSheet } from '@/features/game-tools/bang';
+import { CascadiaSheet } from '@/features/game-tools/cascadia';
+import { CitadelsSheet } from '@/features/game-tools/citadels';
+import { DeceptionSheet } from '@/features/game-tools/deception';
+import { DeepSeaSheet } from '@/features/game-tools/deep-sea';
+import { Flip7Sheet } from '@/features/game-tools/flip7';
+import { HaenyeoSheet } from '@/features/game-tools/haenyeo';
+import { LasVegasSheet } from '@/features/game-tools/las-vegas';
+import { OneNightSheet } from '@/features/game-tools/one-night';
+import { findGameTool } from '@/features/game-tools/registry';
+import { SaboteurSheet } from '@/features/game-tools/saboteur';
+import { SechsNimmtSheet } from '@/features/game-tools/sechs-nimmt';
+import { SecretHitlerSheet } from '@/features/game-tools/secret-hitler';
+import { SkullKingSheet } from '@/features/game-tools/skull-king';
 import { useGames } from '@/features/games/hooks';
 import { useSession } from '@/features/plays/hooks';
 import type { Member, PlayRound } from '@/features/plays/types';
@@ -62,6 +77,9 @@ export function PlaySheet({ visible, onClose }: { visible: boolean; onClose: () 
   const [firstPlayer, setFirstPlayer] = useState<string | null>(null);
   const [drawOpen, setDrawOpen] = useState(false);
   const [timerOpen, setTimerOpen] = useState(false);
+  const [toolOpen, setToolOpen] = useState(false);
+  // 이 게임 전용 도구(점수표 등). 등록된 게임에서만 버튼이 뜬다.
+  const gameTool = useMemo(() => findGameTool(game?.titleKo), [game?.titleKo]);
   const [confirmCancel, setConfirmCancel] = useState(false);
   const elapsed = useElapsedMinutes(play?.startedAt);
   // 판 전체 메모는 스토어 초안 — 시트가 두 곳에 마운트되므로 로컬이면 갈라진다.
@@ -75,6 +93,7 @@ export function PlaySheet({ visible, onClose }: { visible: boolean; onClose: () 
     setRoundScores({});
     setFirstPlayer(null);
     setDrawOpen(false);
+    setToolOpen(false);
     setConfirmCancel(false);
   }, [playId]);
 
@@ -169,10 +188,11 @@ export function PlaySheet({ visible, onClose }: { visible: boolean; onClose: () 
         </View>
 
         <ScrollView contentContainerStyle={styles.content}>
-          {/* 선 뽑기·턴 타이머 — 테이블 위 도구들. 결과는 가운데 팝업으로 크게 */}
+          {/* 선 뽑기·턴 타이머 — 테이블 위 도구들. 등록된 게임이면 전용 도구도 여기 뜬다 */}
           <View style={styles.chipRow}>
             <Chip label="🎲 선 뽑기" onPress={drawFirstPlayer} />
             <Chip label="⏱️ 타이머" onPress={() => setTimerOpen(true)} />
+            {gameTool && <Chip label={gameTool.buttonLabel} onPress={() => setToolOpen(true)} />}
           </View>
 
           <Text style={[styles.sectionLabel, { color: c.textSecondary }]}>라운드 기록</Text>
@@ -310,6 +330,222 @@ export function PlaySheet({ visible, onClose }: { visible: boolean; onClose: () 
         </View>
 
         <GameTimer visible={timerOpen} onClose={() => setTimerOpen(false)} />
+
+        {gameTool?.key === 'avalon' && (
+          <AvalonSheet
+            visible={toolOpen}
+            playerCount={play.memberIds.length}
+            onClose={() => setToolOpen(false)}
+          />
+        )}
+
+        {gameTool?.key === 'saboteur' && (
+          <SaboteurSheet
+            visible={toolOpen}
+            playerCount={play.memberIds.length}
+            onClose={() => setToolOpen(false)}
+          />
+        )}
+
+        {gameTool?.key === 'bang' && (
+          <BangSheet
+            visible={toolOpen}
+            playerCount={play.memberIds.length}
+            onClose={() => setToolOpen(false)}
+          />
+        )}
+
+        {gameTool?.key === 'secret-hitler' && (
+          <SecretHitlerSheet
+            visible={toolOpen}
+            playerCount={play.memberIds.length}
+            onClose={() => setToolOpen(false)}
+          />
+        )}
+
+        {gameTool?.key === 'one-night' && (
+          <OneNightSheet
+            visible={toolOpen}
+            playerCount={play.memberIds.length}
+            onClose={() => setToolOpen(false)}
+          />
+        )}
+
+        {gameTool?.key === 'deception' && (
+          <DeceptionSheet
+            visible={toolOpen}
+            playerCount={play.memberIds.length}
+            onClose={() => setToolOpen(false)}
+          />
+        )}
+
+        {gameTool?.key === 'haenyeo' && (
+          <HaenyeoSheet
+            visible={toolOpen}
+            players={players}
+            draft={session.toolDraft}
+            onDraftChange={session.setToolDraft}
+            pending={session.pending}
+            onCommit={async (totals, winnerIds) => {
+              // 1위가 우승자, 세 정산 합계가 개인 점수 — 통계에 그대로 합류한다
+              const ok = await session.addRound({
+                winnerIds,
+                coop: null,
+                memo: '해녀 정산 합계',
+                scores: totals,
+              });
+              return ok !== null;
+            }}
+            onClose={() => setToolOpen(false)}
+          />
+        )}
+
+        {gameTool?.key === 'deep-sea' && (
+          <DeepSeaSheet
+            visible={toolOpen}
+            players={players}
+            draft={session.toolDraft}
+            onDraftChange={session.setToolDraft}
+            pending={session.pending}
+            onCommit={async (totals, winnerIds) => {
+              // 1위가 우승자, 보물 합계가 개인 점수 — 통계에 그대로 합류한다
+              const ok = await session.addRound({
+                winnerIds,
+                coop: null,
+                memo: '해저탐험 점수표 합계',
+                scores: totals,
+              });
+              return ok !== null;
+            }}
+            onClose={() => setToolOpen(false)}
+          />
+        )}
+
+        {gameTool?.key === 'cascadia' && (
+          <CascadiaSheet
+            visible={toolOpen}
+            players={players}
+            draft={session.toolDraft}
+            onDraftChange={session.setToolDraft}
+            pending={session.pending}
+            onCommit={async (totals, winnerIds) => {
+              // 1위가 우승자, 최종 점수가 개인 점수 — 통계에 그대로 합류한다
+              const ok = await session.addRound({
+                winnerIds,
+                coop: null,
+                memo: '캐스캐디아 정산 합계',
+                scores: totals,
+              });
+              return ok !== null;
+            }}
+            onClose={() => setToolOpen(false)}
+          />
+        )}
+
+        {gameTool?.key === 'sechs-nimmt' && (
+          <SechsNimmtSheet
+            visible={toolOpen}
+            players={players}
+            draft={session.toolDraft}
+            onDraftChange={session.setToolDraft}
+            pending={session.pending}
+            onCommit={async (totals, winnerIds) => {
+              // 최저 벌점이 우승자 — 점수는 벌점 그대로 저장하고 메모로 방향을 밝힌다
+              const ok = await session.addRound({
+                winnerIds,
+                coop: null,
+                memo: '젝스님트 벌점 합계 (낮을수록 승)',
+                scores: totals,
+              });
+              return ok !== null;
+            }}
+            onClose={() => setToolOpen(false)}
+          />
+        )}
+
+        {gameTool?.key === 'skull-king' && (
+          <SkullKingSheet
+            visible={toolOpen}
+            players={players}
+            draft={session.toolDraft}
+            onDraftChange={session.setToolDraft}
+            pending={session.pending}
+            onCommit={async (totals, winnerIds) => {
+              // 1위가 우승자, 합계가 개인 점수 — 기존 통계(전당·최고 기록)에 그대로 합류한다
+              const ok = await session.addRound({
+                winnerIds,
+                coop: null,
+                memo: '스컬킹 점수표 합계',
+                scores: totals,
+              });
+              return ok !== null;
+            }}
+            onClose={() => setToolOpen(false)}
+          />
+        )}
+
+        {gameTool?.key === 'las-vegas' && (
+          <LasVegasSheet
+            visible={toolOpen}
+            players={players}
+            draft={session.toolDraft}
+            onDraftChange={session.setToolDraft}
+            pending={session.pending}
+            onCommit={async (totals, winnerIds) => {
+              // 1위가 우승자, 딴 돈 합계(만$)가 개인 점수 — 통계에 그대로 합류한다
+              const ok = await session.addRound({
+                winnerIds,
+                coop: null,
+                memo: '라스베가스 점수표 합계 (만$)',
+                scores: totals,
+              });
+              return ok !== null;
+            }}
+            onClose={() => setToolOpen(false)}
+          />
+        )}
+
+        {gameTool?.key === 'flip7' && (
+          <Flip7Sheet
+            visible={toolOpen}
+            players={players}
+            draft={session.toolDraft}
+            onDraftChange={session.setToolDraft}
+            pending={session.pending}
+            onCommit={async (totals, winnerIds) => {
+              // 1위가 우승자, 누적 합계가 개인 점수 — 통계에 그대로 합류한다
+              const ok = await session.addRound({
+                winnerIds,
+                coop: null,
+                memo: '플립 7 점수표 합계',
+                scores: totals,
+              });
+              return ok !== null;
+            }}
+            onClose={() => setToolOpen(false)}
+          />
+        )}
+
+        {gameTool?.key === 'citadels' && (
+          <CitadelsSheet
+            visible={toolOpen}
+            players={players}
+            draft={session.toolDraft}
+            onDraftChange={session.setToolDraft}
+            pending={session.pending}
+            onCommit={async (totals, winnerIds) => {
+              // 1위가 우승자, 최종 점수가 개인 점수 — 통계에 그대로 합류한다
+              const ok = await session.addRound({
+                winnerIds,
+                coop: null,
+                memo: '시타델 정산 합계',
+                scores: totals,
+              });
+              return ok !== null;
+            }}
+            onClose={() => setToolOpen(false)}
+          />
+        )}
 
         {/* 선 플레이어 팝업 — 테이블 건너편에서도 보이게 가운데에 크게 */}
         <Modal visible={drawOpen} transparent animationType="fade" onRequestClose={() => setDrawOpen(false)}>

@@ -38,6 +38,8 @@ type Store = {
   activePlay: Play | null;
   /** 판 메모 초안 — 시트가 두 곳(추천 화면·상세)에 마운트되므로 로컬 state로 두면 갈라진다. */
   memoDraft: string;
+  /** 게임 도구(점수표 등)의 작업 중 상태. 메모와 같은 이유로 스토어에 둔다. 판이 끝나면 비운다 */
+  toolDraft: unknown;
   hydrated: boolean;
   skippedGate: boolean;
   error: string | null;
@@ -48,6 +50,7 @@ let store: Store = {
   memberIds: [],
   activePlay: null,
   memoDraft: '',
+  toolDraft: null,
   hydrated: false,
   skippedGate: false,
   error: null,
@@ -245,6 +248,9 @@ export function useSession() {
 
     setMemoDraft: useCallback((memoDraft: string) => setStore({ memoDraft }), []),
 
+    toolDraft: s.toolDraft,
+    setToolDraft: useCallback((toolDraft: unknown) => setStore({ toolDraft }), []),
+
     /**
      * 오늘의 멤버 변경. 게임중이면 그 판의 member_ids도 함께 바꾼다 —
      * 안 바꾸면 중간에 합류한 사람을 우승자로 기록할 수 없고, 새로고침 시
@@ -324,7 +330,8 @@ export function useSession() {
           if (store.activePlay) throw new Error('이미 진행 중인 게임이 있습니다. 먼저 종료하세요.');
           if (!store.memberIds.length) throw new Error('오늘의 멤버를 먼저 선택하세요.');
           const play = await startPlay(gameId, store.memberIds);
-          setStore({ activePlay: play });
+          // 이전 판의 점수표 초안이 새 판으로 넘어오면 안 된다
+          setStore({ activePlay: play, toolDraft: null });
           return play;
         }),
       [run]
@@ -363,7 +370,7 @@ export function useSession() {
           const play = store.activePlay;
           if (!play) throw new Error('진행 중인 게임이 없습니다.');
           const ended = await endPlay(play.id, memo);
-          setStore({ activePlay: null, memoDraft: '' });
+          setStore({ activePlay: null, memoDraft: '', toolDraft: null });
           // 서버가 games.last_played_at을 갱신했다(로컬 날짜 기준). 캐시도 맞춘다.
           touchGameLastPlayed(ended.gameId, localToday());
           return ended;
@@ -391,8 +398,8 @@ export function useSession() {
           const play = store.activePlay;
           if (!play) return true;
           await cancelPlay(play.id);
-          // 취소된 판의 메모 초안이 다음 판으로 넘어가면 안 된다.
-          setStore({ activePlay: null, memoDraft: '' });
+          // 취소된 판의 메모·점수표 초안이 다음 판으로 넘어가면 안 된다.
+          setStore({ activePlay: null, memoDraft: '', toolDraft: null });
           return true;
         }),
       [run]
