@@ -1,7 +1,10 @@
 import { Tabs, TabList, TabTrigger, TabSlot, TabTriggerSlotProps, TabListProps } from 'expo-router/ui';
+import { useState } from 'react';
 import { Pressable, View, StyleSheet, Text } from 'react-native';
 
+import { LoginModal } from '@/components/login-modal';
 import { Radius, Spacing, TouchTarget, Typography } from '@/constants/theme';
+import { useAuthed } from '@/hooks/use-auth';
 import { useBreakpoint } from '@/hooks/use-breakpoint';
 import { useTheme } from '@/hooks/use-theme';
 
@@ -60,6 +63,9 @@ export function AppBar(props: TabListProps) {
   const c = useTheme();
   // 폰 폭에서는 브랜드 텍스트가 탭 5개를 밀어내 줄이 깨진다. 주사위만 남긴다.
   const compact = useBreakpoint() === 'compact';
+  // 공용 계정 로그인 — 조회는 공개라서 쓰는 사람(집 기기)만 여기를 누른다.
+  const authed = useAuthed();
+  const [loginOpen, setLoginOpen] = useState(false);
   return (
     <View
       {...props}
@@ -68,6 +74,14 @@ export function AppBar(props: TabListProps) {
         {compact ? '🎲' : '🎲 MeePick'}
       </Text>
       <View style={[styles.tabGroup, compact && styles.tabGroupCompact]}>{props.children}</View>
+      <Pressable
+        onPress={() => setLoginOpen(true)}
+        accessibilityRole="button"
+        accessibilityLabel={authed ? '로그인됨 — 계정 관리' : '로그인'}
+        style={({ pressed }) => [styles.lock, pressed && styles.pressed]}>
+        <Text style={styles.lockIcon}>{authed ? '🔓' : '🔒'}</Text>
+      </Pressable>
+      <LoginModal visible={loginOpen} onClose={() => setLoginOpen(false)} />
     </View>
   );
 }
@@ -94,5 +108,12 @@ const styles = StyleSheet.create({
     borderRadius: Radius.full,
   },
   tabLabel: { ...Typography.body, fontWeight: '600' },
+  lock: {
+    minWidth: TouchTarget.min,
+    minHeight: TouchTarget.min,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  lockIcon: { ...Typography.body },
   pressed: { opacity: 0.7 },
 });

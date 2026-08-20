@@ -1,3 +1,4 @@
+import { requireAuth } from '@/lib/auth';
 import { supabase } from '@/lib/supabase';
 
 import { toGame, toGameRow, type GameInput, type GameRow } from './mappers';
@@ -52,6 +53,7 @@ export async function fetchGameById(id: string): Promise<Game | null> {
  * 노션 재임포트가 제목 기준 upsert이므로, 이 제약이 깨지면 임포트도 함께 깨진다.
  */
 export async function createGame(input: GameInput): Promise<Game> {
+  await requireAuth();
   const { data, error } = await supabase
     .from('games')
     .insert(toGameRow(input))
@@ -67,6 +69,7 @@ export async function createGame(input: GameInput): Promise<Game> {
 
 /** 게임 수정. 반환: Game (갱신된 행) */
 export async function updateGame(id: string, input: GameInput): Promise<Game> {
+  await requireAuth();
   const { data, error } = await supabase
     .from('games')
     .update(toGameRow(input))
@@ -83,6 +86,7 @@ export async function updateGame(id: string, input: GameInput): Promise<Game> {
 
 /** 게임 삭제. */
 export async function deleteGame(id: string): Promise<void> {
+  await requireAuth();
   const { error } = await supabase.from('games').delete().eq('id', id);
   if (error) throw new Error(error.message);
 }

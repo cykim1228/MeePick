@@ -18,6 +18,8 @@ export default function Root({ children }: PropsWithChildren) {
         />
         <title>MeePick</title>
         <meta name="description" content="집 보드게임 소장 목록 — 오늘 뭐 할지 골라주는 앱" />
+        {/* 외부 공개용 — 링크를 아는 사람만 보면 되고 검색엔진에 실릴 이유는 없다. */}
+        <meta name="robots" content="noindex" />
 
         <link rel="manifest" href="/manifest.json" />
         {/* 팔레트와 동일한 값 — src/constants/theme.ts의 background */}

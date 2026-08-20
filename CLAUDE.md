@@ -64,7 +64,7 @@ Android 기기/에뮬레이터는 `npm run android`, 개발 서버만 띄우려�
 - **디자인 토큰만 사용한다.** 색·간격·폰트 크기를 화면 코드에 리터럴로 쓰지 않는다.
 - **반응형 분기는 `useBreakpoint()`로만** 한다. 화면에서 `width > 900` 같은 숫자를 직접 쓰지 않는다.
 - `any` / `@ts-ignore` / 강제 제네릭 캐스팅으로 타입 에러를 덮지 않는다.
-- **쓰기가 anon에 열려 있다.** 집에서 쓰는 앱이라 로그인을 두지 않은 결과이며 **보안 경계가 아니다** — URL과 publishable 키를 아는 사람은 목록을 수정할 수 있다. 외부에 배포하게 되면 Supabase Auth를 붙이고 `games_anon_*` 정책을 `authenticated`로 좁힌다.
+- **조회는 공개, 쓰기는 로그인 뒤다.** 외부 공개(deploy/https.md)와 함께 anon 쓰기를 잠갔다(`20260821090000_auth_write_lock.sql`). 로그인은 **공용 계정 1개**(비밀번호 공유)이고 가입은 대시보드에서 꺼 뒀다 — 열면 anon 키로 누구나 authenticated가 되어 잠금이 무의미해진다. 쓰기 쿼리는 첫 줄에서 `requireAuth()`(src/lib/auth.ts)를 불러 조용한 실패(RLS에 막힌 update/delete는 에러 없이 0행 매칭)를 친절한 메시지로 바꾼다. 새 쓰기 쿼리를 만들면 반드시 같은 가드를 넣는다.
 - **`SUPABASE_SECRET_KEY`에 `EXPO_PUBLIC_` 접두사를 붙이지 않는다.** 붙이는 순간 RLS를 우회하는 키가 앱 번들에 들어간다.
 - Expo 57은 이전 버전과 API가 다르다. 코드 작성 전 https://docs.expo.dev/versions/v57.0.0/ 를 확인한다.
 - **커밋 메시지 양식**: 깃이모지 제목(예: `🎨 참여 현황 UI 강화 + 로컬 환경 정비`) + 간단한 `- ` 불릿 본문. `feat:` 같은 접두사는 쓰지 않는다. 쉽고 직관적으로.

@@ -1,3 +1,4 @@
+import { requireAuth } from '@/lib/auth';
 import { localToday } from '@/lib/dates';
 import { supabase } from '@/lib/supabase';
 
@@ -13,6 +14,7 @@ export async function fetchMembers(): Promise<Member[]> {
 
 /** 반환: Member (생성된 행). 같은 이름은 23505로 거부된다. */
 export async function createMember(name: string): Promise<Member> {
+  await requireAuth();
   const { data, error } = await supabase
     .from('members')
     .insert({ name: name.trim() })
@@ -31,6 +33,7 @@ export async function createMember(name: string): Promise<Member> {
  * 기록이 있어도 안전하다. 오타 수정은 반드시 이쪽으로.
  */
 export async function renameMember(id: string, name: string): Promise<Member> {
+  await requireAuth();
   const trimmed = name.trim();
   const { data, error } = await supabase
     .from('members')
@@ -50,6 +53,7 @@ export async function renameMember(id: string, name: string): Promise<Member> {
  * rounds의 winnerIds가 FK가 아니어서, 지우면 과거 우승 기록이 유령 id가 된다.
  */
 export async function deleteMember(id: string): Promise<void> {
+  await requireAuth();
   const { data: used, error: checkError } = await supabase
     .from('plays')
     .select('id')
@@ -100,6 +104,7 @@ export async function fetchPlayCounts(): Promise<Map<string, number>> {
  * plays 행 생성과 last_played_at 갱신을 서버에서 한 번에 — 나누면 횟수와 날짜가 어긋날 수 있다.
  */
 export async function logPlay(gameId: string, memberIds: string[]): Promise<Play> {
+  await requireAuth();
   const { data, error } = await supabase.rpc('log_play', {
     p_game_id: gameId,
     p_member_ids: memberIds,
@@ -160,6 +165,7 @@ export async function fetchPlayHistory(limit = 500): Promise<PlayWithGame[]> {
 
 /** 기록 삭제 — 잘못 남긴 판을 지운다. 끝난 판도 지울 수 있다. */
 export async function deletePlay(playId: string): Promise<void> {
+  await requireAuth();
   const { error } = await supabase.from('plays').delete().eq('id', playId);
   if (error) throw new Error(error.message);
 }
@@ -179,6 +185,7 @@ export async function fetchRecentPlays(gameId: string, limit = 3): Promise<Play[
 
 /** 게임 시작. 반환: Play (게임중 상태의 새 플레이) */
 export async function startPlay(gameId: string, memberIds: string[]): Promise<Play> {
+  await requireAuth();
   const { data, error } = await supabase
     .from('plays')
     .insert({ game_id: gameId, member_ids: memberIds })
@@ -195,6 +202,7 @@ export async function startPlay(gameId: string, memberIds: string[]): Promise<Pl
 
 /** 진행 중 플레이의 멤버 교체 — 중간 합류/이탈. 반환: Play */
 export async function updatePlayMembers(playId: string, memberIds: string[]): Promise<Play> {
+  await requireAuth();
   const { data, error } = await supabase
     .from('plays')
     .update({ member_ids: memberIds })
@@ -208,6 +216,7 @@ export async function updatePlayMembers(playId: string, memberIds: string[]): Pr
 
 /** 라운드 기록 갱신. 반환: Play */
 export async function updatePlayRounds(playId: string, rounds: PlayRound[]): Promise<Play> {
+  await requireAuth();
   const { data, error } = await supabase
     .from('plays')
     .update({ rounds: toRoundsJson(rounds) })
@@ -226,6 +235,7 @@ export async function updatePlayRecord(
   playId: string,
   patch: { rounds?: PlayRound[]; memo?: string | null; scores?: Record<string, number> }
 ): Promise<Play> {
+  await requireAuth();
   const body: Partial<PlayRow> = {};
   if (patch.rounds !== undefined) body.rounds = toRoundsJson(patch.rounds);
   if (patch.memo !== undefined) body.memo = patch.memo;
@@ -252,6 +262,7 @@ export async function updatePlayRecord(
  * RPC인 이유: 플레이 종료와 games.last_played_at 갱신을 서버에서 한 번에 처리한다.
  */
 export async function endPlay(playId: string, memo?: string): Promise<Play> {
+  await requireAuth();
   const { data, error } = await supabase.rpc('end_play', {
     p_play_id: playId,
     // 서버 current_date는 UTC라 KST 새벽에 하루 어긋난다. 로컬 날짜를 명시한다.
@@ -268,6 +279,7 @@ export async function endPlay(playId: string, memo?: string): Promise<Play> {
 
 /** 시작 취소 — 진행 중인 플레이를 기록 없이 지운다. 끝난 플레이는 건드리지 않는다. */
 export async function cancelPlay(playId: string): Promise<void> {
+  await requireAuth();
   const { error } = await supabase.from('plays').delete().eq('id', playId).is('ended_at', null);
   if (error) throw new Error(error.message);
 }

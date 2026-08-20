@@ -82,7 +82,29 @@ node scripts/upload-images.mjs
 
 기능이 추가되면 `supabase/migrations/`에 새 SQL 파일이 생긴다. **가장 최근 파일만** SQL Editor에 붙여넣고 Run 하면 된다 (파일들은 재실행해도 안전하게 작성돼 있다).
 
-현재 최신: `20260812120000_rule_video.sql` — 룰 영상(유튜브 링크) 컬럼. 노션 '룰 영상' 속성이 임포트되고, 상세 화면의 "룰 영상 보기" 버튼이 이 값을 연다.
+현재 최신: `20260821090000_auth_write_lock.sql` — 외부 공개용 쓰기 잠금. 조회는 공개로
+남기고 쓰기를 로그인 사용자로 좁힌다. **이 마이그레이션은 8단계(공용 계정)와 한 몸이다** —
+계정 없이 잠금만 적용하면 앱에서 기록할 방법이 없어진다.
+
+## 7-1. 외부 공개용 잠금 (공용 계정 + 가입 차단)
+
+앱을 인터넷에 공개하면(deploy/https.md) 번들의 anon 키가 방문자 전원에게 전달된다.
+그래서 조회는 공개로 두되 **쓰기는 로그인 뒤로** 잠근다. 계정은 공용 1개다.
+
+로그인 화면은 **아이디 + 비밀번호**다. Supabase 계정은 이메일 형식이 필수라서
+앱이 아이디에 `@meepick.local`을 붙여 인증한다 (`src/lib/auth.ts`의 `toAuthEmail`).
+따라서 대시보드 계정도 같은 규칙으로 만든다.
+
+1. **SQL Editor**에서 `supabase/migrations/20260821090000_auth_write_lock.sql` 실행
+2. **Authentication → Users → Add user → Create new user**
+   - Email: `<아이디>@meepick.local` — 앱에서 아이디만 입력하면 이 주소로 인증된다
+   - Password: 공유할 비밀번호
+   - **Auto Confirm User** 체크 (안 하면 확인 메일을 기다리다 끝난다)
+3. **Authentication → Sign In / Providers**에서 **"Allow new users to sign up" 끄기**
+   - 가입이 열려 있으면 anon 키로 누구나 계정을 만들어 잠금이 무의미해진다. **필수.**
+
+앱에서는 상단의 🔒에 아이디·비밀번호를 넣는다. 기기당 1회면 세션이 유지된다.
+비밀번호를 잊으면 대시보드 → Users에서 재설정한다 (메일 복구는 없다 — 가짜 도메인이다).
 
 ## 7. 노션 데이터를 갱신했을 때
 

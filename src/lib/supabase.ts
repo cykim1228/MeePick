@@ -1,11 +1,20 @@
 import 'react-native-url-polyfill/auto';
 
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient } from '@supabase/supabase-js';
+import { Platform } from 'react-native';
 
 import type { Database } from './database.types';
 
 const url = process.env.EXPO_PUBLIC_SUPABASE_URL;
 const anonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+
+/**
+ * app.json의 web.output이 "static"이라 웹은 빌드 시 Node에서 한 번 렌더된다.
+ * 그 단계에는 window가 없어 저장소(localStorage) 접근이 `window is not defined`로 죽는다.
+ * 정적 산출물에 세션이 필요할 리 없으므로 그때만 세션 기능을 끈다.
+ */
+const isStaticRender = Platform.OS === 'web' && typeof window === 'undefined';
 
 /**
  * 환경 변수가 없으면 supabase-js가 생성 시점에 던지지 않고 요청 시점에 모호하게 실패한다.
@@ -22,16 +31,15 @@ export const supabaseConfigError =
 export const supabase = createClient<Database>(url ?? 'http://localhost', anonKey ?? 'missing-key', {
   auth: {
     /**
-     * 이 앱은 로그인이 없다. anon 키로 공개 읽기만 하고 쓰기는 mark_played RPC로만 한다.
-     * 유지할 세션이 없으므로 저장소를 아예 쓰지 않는다.
-     *
-     * 켜두면 안 되는 이유가 하나 더 있다 — app.json의 web.output이 "static"이라
-     * 웹은 Node에서 서버 렌더링되는데, supabase-js가 초기화 중 세션 복구를 시도하며
-     * 저장소(웹에서는 window.localStorage)에 접근해 `window is not defined`로 죽는다.
+     * 조회는 공개지만 쓰기는 로그인(공용 계정)이 필요하다 — 강제는 RLS가 한다
+     * (supabase/migrations/20260821090000_auth_write_lock.sql).
+     * 세션을 저장해 기기당 로그인 1회로 유지한다. 네이티브는 기본 저장소가 없어
+     * AsyncStorage를 명시한다.
      */
-    persistSession: false,
-    autoRefreshToken: false,
-    // URL 해시 기반 세션 감지는 웹 전용이며, 여기서는 쓰지 않는다.
+    persistSession: !isStaticRender,
+    autoRefreshToken: !isStaticRender,
+    // URL 해시 기반 세션 감지는 OAuth 리다이렉트용 — 비밀번호 로그인만 쓰므로 끈다.
     detectSessionInUrl: false,
+    ...(Platform.OS !== 'web' ? { storage: AsyncStorage } : {}),
   },
 });
