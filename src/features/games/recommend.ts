@@ -1,4 +1,4 @@
-import type { Game, GameFilter, SortKey } from './types';
+import type { Game, GameFilter, PlaytimeBand, SortKey } from './types';
 
 /* ── 파생 개념 ─────────────────────────────────────────────────────────────
  * 화면에서 쓰는 말은 원시 필드가 아니라 파생값이다. 계산은 여기 한 곳에서만 한다. */
@@ -15,6 +15,21 @@ export function playtimeLabel(min: number | null, max: number | null): string {
   if (min === null && max === null) return '시간 미상';
   if (min !== null && max !== null && min !== max) return `${min}~${max}분`;
   return `${max ?? min}분`;
+}
+
+/**
+ * 게임이 속한 시간 구간. **최대 소요 시간 기준**이다 —
+ * '30~45분'은 45분짜리로 보고 1시간 구간에 넣는다. 최소값으로 잡으면
+ * 길어질 수 있는 게임이 짧은 구간에 섞여 "30분 안에 끝내자"는 약속이 깨진다.
+ * 시간 정보가 없으면 null이고, 시간 필터를 걸면 후보에서 빠진다.
+ */
+export function playtimeBandOf(game: Game): PlaytimeBand | null {
+  const t = game.maxPlaytime ?? game.minPlaytime;
+  if (t === null) return null;
+  if (t <= 30) return 'short';
+  if (t <= 60) return 'medium';
+  if (t <= 120) return 'long';
+  return 'epic';
 }
 
 export function playerLabel(game: Game): string {
@@ -62,11 +77,8 @@ export function playerFit(game: Game, n: number): PlayerFit {
 export function passesFilter(game: Game, f: GameFilter): boolean {
   if (f.playerCount !== null && playerFit(game, f.playerCount) === 'no') return false;
 
-  // 최소 시간이 상한을 넘으면 그 시간 안에 끝날 수 없다.
-  if (f.maxPlaytime !== null) {
-    if (game.minPlaytime === null) return false;
-    if (game.minPlaytime > f.maxPlaytime) return false;
-  }
+  // 구간은 서로 겹치지 않는다 — 1시간을 고르면 30분짜리는 나오지 않는다.
+  if (f.playtimeBand !== null && playtimeBandOf(game) !== f.playtimeBand) return false;
 
   if (f.weightRange !== null) {
     if (game.weight === null) return false;
@@ -92,7 +104,38 @@ export function passesFilter(game: Game, f: GameFilter): boolean {
 /* ── 점수 ──────────────────────────────────────────────────────────────────
  * 가중치는 스펙의 일부다. 화면에서 임의로 바꾸지 않는다. */
 
-export function scoreGame(game: Game, f: GameFilter, today = new Date()): number {
+/**
+ * 하트 정보. 게임 객체에 얹지 않고 따로 넘긴다 — 게임 캐시와 하트는 갱신 주기가 다르고
+ * (하트는 로그인마다 다시 읽는다), 한 객체로 합치면 하트 한 번에 목록 전체가 새 객체가 된다.
+ */
+export type LikeContext = {
+  /** gameId → 하트를 누른 사람들 */
+  byGame: Map<string, Set<string>>;
+  /** 오늘 온 사람들의 profile id. 비어 있으면 하트는 점수에 영향을 주지 않는다 */
+  audience: Set<string>;
+};
+
+export const NO_LIKES: LikeContext = { byGame: new Map(), audience: new Set() };
+
+/**
+ * 오늘 온 사람들 중 이 게임에 하트를 누른 비율(0~1).
+ * 사람 수가 아니라 비율인 이유: 2명 모인 날의 2표와 8명 모인 날의 2표는 무게가 다르다.
+ */
+function audienceLikeRatio(game: Game, likes: LikeContext): number {
+  if (likes.audience.size === 0) return 0;
+  const who = likes.byGame.get(game.id);
+  if (!who) return 0;
+  let hits = 0;
+  for (const id of likes.audience) if (who.has(id)) hits += 1;
+  return hits / likes.audience.size;
+}
+
+export function scoreGame(
+  game: Game,
+  f: GameFilter,
+  today = new Date(),
+  likes: LikeContext = NO_LIKES
+): number {
   let score = 0;
 
   if (f.playerCount !== null) {
@@ -106,10 +149,8 @@ export function scoreGame(game: Game, f: GameFilter, today = new Date()): number
     if (f.playerCount === hi && fit === 'possible') score -= 5;
   }
 
-  if (f.maxPlaytime !== null) {
-    if (game.maxPlaytime !== null && game.maxPlaytime <= f.maxPlaytime) score += 20;
-    else if (game.minPlaytime !== null && game.minPlaytime <= f.maxPlaytime) score += 8;
-  }
+  // 시간은 점수를 주지 않는다 — 구간이 하드 필터라 통과한 게임은 전부 같은 구간이고,
+  // 모두에게 같은 값을 더하면 순위가 바뀌지 않는다.
 
   if (f.weightRange !== null && game.weight !== null) {
     const [lo, hi] = f.weightRange;
@@ -124,6 +165,16 @@ export function scoreGame(game: Game, f: GameFilter, today = new Date()): number
   else if (neglect === 'while') score += 5;
   else score -= 10;
 
+  /**
+   * 오늘 온 사람들이 하고 싶어 하는 게임.
+   *
+   * 최대 20점 — 방치도(25점)보다는 낮고 난이도 적합(15점)보다는 높게 뒀다.
+   * "오랫동안 안 한 것"은 앱이 짐작하는 가치이고 하트는 사람이 직접 말한 것이라
+   * 더 무겁게 볼 이유가 있지만, 그 말이 몇 달 전 것일 수도 있어 발굴을 뒤엎진 않게 한다.
+   * 전원이 하트를 눌렀을 때만 20점이 다 붙는다.
+   */
+  score += 20 * audienceLikeRatio(game, likes);
+
   // 추정값으로 채운 게임은 확신이 낮으므로 동점일 때 뒤로 보낸다.
   if (game.isEstimated) score -= 3;
 
@@ -134,8 +185,18 @@ export function scoreGame(game: Game, f: GameFilter, today = new Date()): number
 
 const byTitle = (a: Game, b: Game) => a.titleKo.localeCompare(b.titleKo, 'ko');
 
-function comparator(sort: SortKey, f: GameFilter, today: Date) {
+function comparator(sort: SortKey, f: GameFilter, today: Date, likes: LikeContext) {
   switch (sort) {
+    case 'mostLiked':
+      return (a: Game, b: Game) => {
+        const av = likes.byGame.get(a.id)?.size ?? 0;
+        const bv = likes.byGame.get(b.id)?.size ?? 0;
+        // 하트가 같으면 추천 점수로 갈라 준다 — 아무도 안 누른 구간이 제목순으로 죽 늘어서면
+        // '하트순'이라는 이름이 무색해진다.
+        if (av !== bv) return bv - av;
+        const diff = scoreGame(b, f, today, likes) - scoreGame(a, f, today, likes);
+        return diff !== 0 ? diff : byTitle(a, b);
+      };
     case 'mostPlayed':
       return (a: Game, b: Game) => {
         if (b.playCount !== a.playCount) return b.playCount - a.playCount;
@@ -167,7 +228,7 @@ function comparator(sort: SortKey, f: GameFilter, today: Date) {
       };
     default:
       return (a: Game, b: Game) => {
-        const diff = scoreGame(b, f, today) - scoreGame(a, f, today);
+        const diff = scoreGame(b, f, today, likes) - scoreGame(a, f, today, likes);
         if (diff !== 0) return diff;
         // 동점이면 쉬운 것 우선, 그다음 제목순으로 순서를 안정화한다.
         const aw = a.weight ?? Number.MAX_SAFE_INTEGER;
@@ -177,8 +238,14 @@ function comparator(sort: SortKey, f: GameFilter, today: Date) {
   }
 }
 
-export function applyFilter(games: Game[], f: GameFilter, today = new Date()): Game[] {
-  return games.filter((g) => passesFilter(g, f)).sort(comparator(f.sort, f, today));
+/** 필터 + 정렬. likes는 '하트순' 정렬과 추천 점수 양쪽에 쓰인다. */
+export function applyFilter(
+  games: Game[],
+  f: GameFilter,
+  today = new Date(),
+  likes: LikeContext = NO_LIKES
+): Game[] {
+  return games.filter((g) => passesFilter(g, f)).sort(comparator(f.sort, f, today, likes));
 }
 
 /* ── 결과 없음 대안 ────────────────────────────────────────────────────────
@@ -198,8 +265,8 @@ export function relaxations(games: Game[], f: GameFilter): Relaxation[] {
   if (f.categories.length)
     candidates.push({ label: '카테고리 조건 빼기', filter: { ...f, categories: [] } });
   if (f.weightRange) candidates.push({ label: '난이도 조건 빼기', filter: { ...f, weightRange: null } });
-  if (f.maxPlaytime !== null)
-    candidates.push({ label: '시간 조건 빼기', filter: { ...f, maxPlaytime: null } });
+  if (f.playtimeBand !== null)
+    candidates.push({ label: '시간 조건 빼기', filter: { ...f, playtimeBand: null } });
   if (f.playerCount !== null) {
     const n = f.playerCount;
     if (n > 1)

@@ -1,9 +1,9 @@
+import { router } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
 import {
   FlatList,
   Modal,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -12,6 +12,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Chip } from '@/components/chip';
+import { ChipRow } from '@/components/chip-row';
 import { GameCard } from '@/components/game-card';
 import { CenterModal } from '@/components/center-modal';
 import { CollapsibleFilterSection } from '@/components/filter-section';
@@ -21,21 +22,40 @@ import { PlaySheet } from '@/components/play-sheet';
 import { SessionSetup } from '@/components/session-setup';
 import { EmptyView, ErrorView, LoadingView } from '@/components/state-views';
 import { Radius, Spacing, TouchTarget, Typography } from '@/constants/theme';
+import { setPostDraft } from '@/features/community/draft';
+import { useMeetups, useMyProfile } from '@/features/community/hooks';
+import { useGameLikes } from '@/features/games/likes';
 import { useGames } from '@/features/games/hooks';
-import { countBy, optionCounts, relaxations } from '@/features/games/recommend';
-import { EMPTY_FILTER, type Game, type GameFilter, type SortKey } from '@/features/games/types';
+import {
+  countBy,
+  optionCounts,
+  passesFilter,
+  playtimeBandOf,
+  relaxations,
+} from '@/features/games/recommend';
+import {
+  EMPTY_FILTER,
+  type Game,
+  type GameFilter,
+  type PlaytimeBand,
+  type SortKey,
+} from '@/features/games/types';
 import { usePlayHistory, useSession } from '@/features/plays/hooks';
 import { computeStandings } from '@/features/plays/stats';
 import { useElapsedMinutes } from '@/hooks/use-elapsed-minutes';
 import { useGridColumns } from '@/hooks/use-grid-columns';
+import { useConfirmOnce } from '@/hooks/use-confirm-once';
 import { useTheme } from '@/hooks/use-theme';
+import { useType } from '@/hooks/use-type';
 import { localDateOf, localToday } from '@/lib/dates';
 
 const PLAYER_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-const TIME_OPTIONS: { label: string; value: number }[] = [
-  { label: '30분 이내', value: 30 },
-  { label: '1시간', value: 60 },
-  { label: '2시간', value: 120 },
+/** 겹치지 않는 구간이다 — 라벨의 시간은 그 구간의 상한을 뜻한다. */
+const TIME_OPTIONS: { label: string; value: PlaytimeBand }[] = [
+  { label: '30분', value: 'short' },
+  { label: '1시간', value: 'medium' },
+  { label: '2시간', value: 'long' },
+  { label: '2시간+', value: 'epic' },
 ];
 const WEIGHT_OPTIONS: { label: string; value: [number, number] }[] = [
   { label: '가볍게', value: [1, 2] },
@@ -43,32 +63,34 @@ const WEIGHT_OPTIONS: { label: string; value: [number, number] }[] = [
   { label: '묵직하게', value: [3, 5] },
 ];
 
-/** 테마 53종·메커니즘 80종은 롱테일이라 상위만 깔고 나머지는 더보기로 접는다. */
-const TOP_OPTIONS = 8;
-
 const SORTS: { key: SortKey; label: string }[] = [
   { key: 'recommended', label: '추천순' },
+  { key: 'mostLiked', label: '하트순' },
   { key: 'mostPlayed', label: '많이 한 순' },
   { key: 'longestUnplayed', label: '오랜만인 순' },
 ];
 
 export default function RecommendScreen() {
   const c = useTheme();
+  const t = useType();
   const insets = useSafeAreaInsets();
   const session = useSession();
+  // 게임 목록은 모임의 공용 자산이라 모임장만 고친다.
+  const me = useMyProfile();
+  const canEditGames = me.profile?.isAdmin ?? false;
+  const likes = useGameLikes();
 
   const [filter, setFilter] = useState<GameFilter>(EMPTY_FILTER);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editing, setEditing] = useState<Game | null>(null);
   const [changingMembers, setChangingMembers] = useState(false);
   const [sheetOpen, setSheetOpen] = useState(false);
-  const [confirmEndSession, setConfirmEndSession] = useState(false);
+  // 모임 마무리 확인 — 다른 곳을 건드리면 풀린다.
+  const endConfirm = useConfirmOnce<'end'>();
   /** 모임 마무리 리캡 — 세션을 닫기 직전에 데이터를 붙잡아 팝업으로 보여준다 */
-  const [recap, setRecap] = useState<{ count: number; winners: string; minutes: number } | null>(
+  const [recap, setRecap] = useState<{ count: number; winners: string; minutes: number; titles: string[] } | null>(
     null
   );
-  const [showAllThemes, setShowAllThemes] = useState(false);
-  const [showAllMechanics, setShowAllMechanics] = useState(false);
   // 옵션이 많은 축은 기본 접힘 — 펼쳐두면 필터 영역이 목록을 밀어낸다.
   const [themeSectionOpen, setThemeSectionOpen] = useState(false);
   const [mechanicsSectionOpen, setMechanicsSectionOpen] = useState(false);
@@ -79,7 +101,15 @@ export default function RecommendScreen() {
     (width - Spacing.four * 2 - Spacing.three * (columns - 1)) / columns
   );
 
-  const { all, games, loading, error, reload } = useGames(filter);
+  /**
+   * 오늘 온 사람들 중 계정이 있는 사람. 이 사람들이 하트를 누른 게임이 추천 위로 올라온다.
+   * 손님은 하트를 누를 계정이 없으니 자연히 빠진다.
+   */
+  const audience = useMemo(
+    () => session.sessionMembers.map((m) => m.profileId).filter((id): id is string => Boolean(id)),
+    [session.sessionMembers]
+  );
+  const { all, games, loading, error, reload } = useGames(filter, audience);
   const selected = useMemo(() => games.find((g) => g.id === selectedId) ?? null, [games, selectedId]);
   const categoryOptions = useMemo(() => countBy(all, 'categories').map(([v]) => v), [all]);
   const alternatives = useMemo(
@@ -103,24 +133,54 @@ export default function RecommendScreen() {
     const winners = computeStandings(todayPlays, session.members)
       .filter((s) => s.roundWins > 0)
       .slice(0, 3);
-    return { count: todayPlays.length, winners };
+    // 같은 게임을 여러 판 했으면 제목은 한 번만. 순서는 한 순서를 지킨다.
+    const titles = [...new Set(todayPlays.map((p) => p.gameTitle))].reverse();
+    return { count: todayPlays.length, winners, titles };
   }, [allPlays, session.members]);
+
+  /**
+   * 회고 글이 붙을 일정.
+   *
+   * 일정에서 시작한 모임이면 그것이 답이다. 아니면 오늘 잡혀 있던 일정을 찾아 본다 —
+   * 버튼을 안 눌렀어도 그 일정의 날에 논 것은 맞으니까.
+   */
+  const { meetups } = useMeetups(me.isMember);
+  const todayMeetup = useMemo(
+    () =>
+      session.meetup ??
+      meetups.find((m) => localDateOf(m.startsAt) === localToday()) ??
+      null,
+    [meetups, session.meetup]
+  );
 
   const categories = useMemo(() => countBy(all, 'categories').map(([v]) => v), [all]);
   const themesAll = useMemo(() => countBy(all, 'themes').map(([v]) => v), [all]);
   const mechanicsAll = useMemo(() => countBy(all, 'mechanics').map(([v]) => v), [all]);
-  const themes = showAllThemes ? themesAll : themesAll.slice(0, TOP_OPTIONS);
-  const mechanics = showAllMechanics ? mechanicsAll : mechanicsAll.slice(0, TOP_OPTIONS);
 
   const categoryCounts = useMemo(
     () => optionCounts(all, filter, 'categories', categories),
     [all, filter, categories]
   );
-  const themeCounts = useMemo(() => optionCounts(all, filter, 'themes', themes), [all, filter, themes]);
-  const mechanicCounts = useMemo(
-    () => optionCounts(all, filter, 'mechanics', mechanics),
-    [all, filter, mechanics]
+  const themeCounts = useMemo(
+    () => optionCounts(all, filter, 'themes', themesAll),
+    [all, filter, themesAll]
   );
+  const mechanicCounts = useMemo(
+    () => optionCounts(all, filter, 'mechanics', mechanicsAll),
+    [all, filter, mechanicsAll]
+  );
+
+  // 구간이 겹치지 않아 빈 구간이 생길 수 있다. 누르기 전에 몇 개인지 보여준다(0이면 흐려짐).
+  const timeCounts = useMemo(() => {
+    const base = { ...filter, playtimeBand: null };
+    const counts = {} as Record<PlaytimeBand, number>;
+    for (const o of TIME_OPTIONS) {
+      counts[o.value] = all.filter(
+        (g) => playtimeBandOf(g) === o.value && passesFilter(g, base)
+      ).length;
+    }
+    return counts;
+  }, [all, filter]);
 
   const toggleTag = (key: 'categories' | 'themes' | 'mechanics', value: string) =>
     setFilter((f) => ({
@@ -130,7 +190,7 @@ export default function RecommendScreen() {
 
   // 인원만 남기고 나머지 분류를 전부 비운다.
   const hasExtraFilters =
-    filter.maxPlaytime !== null ||
+    filter.playtimeBand !== null ||
     filter.weightRange !== null ||
     filter.categories.length > 0 ||
     filter.themes.length > 0 ||
@@ -148,14 +208,35 @@ export default function RecommendScreen() {
     }
   };
 
-  // 모임 마무리 — 2탭 확인 후, 오늘 판이 있으면 리캡을 먼저 보여준다.
-  const endSession = () => {
-    if (!confirmEndSession) {
-      setConfirmEndSession(true);
-      return;
-    }
-    setConfirmEndSession(false);
+  /**
+   * 리캡을 그대로 피드 초안으로 옮긴다.
+   *
+   * 모임 후기가 안 남는 건 쓸 말이 없어서가 아니라 빈 칸 앞에서 멈추기 때문이다.
+   * 오늘 뭘 했고 누가 이겼는지는 앱이 이미 알고 있으니, 첫 문장을 앱이 쓴다.
+   * 사진 붙이고 한 줄 고치는 일만 사람에게 남긴다.
+   */
+  const writeRecap = () => {
+    if (!recap) return;
+    const lines = [`오늘 ${recap.count}판 — ${recap.titles.join(', ')}`];
+    if (recap.winners) lines.push(recap.winners);
+    if (recap.minutes > 0) lines.push(`총 플레이 ${recap.minutes}분`);
+    setPostDraft({
+      // 끝에 빈 줄을 둬서 커서가 아래에 놓이게 한다 — 사진 설명을 이어 쓰기 좋다.
+      body: `${lines.join('\n')}\n\n`,
+      meetupId: todayMeetup?.id ?? null,
+      meetupTitle: todayMeetup?.title ?? null,
+    });
+    finalizeSession();
+    router.push('/feed');
+  };
 
+  // 모임 마무리 — 2탭 확인 후, 오늘 판이 있으면 리캡을 먼저 보여준다.
+  const endSession = () =>
+    endConfirm.press('end', () => {
+      finishSession();
+    });
+
+  const finishSession = () => {
     if (!todaySummary) {
       finalizeSession();
       return;
@@ -176,6 +257,7 @@ export default function RecommendScreen() {
         .map((w, i) => `${i === 0 ? '🏆 ' : ''}${w.member.name} ${w.roundWins}승`)
         .join(' · '),
       minutes,
+      titles: todaySummary.titles,
     });
   };
 
@@ -229,6 +311,15 @@ export default function RecommendScreen() {
           숨기면 '둘러볼게요'를 누른 뒤 멤버를 고를 진입점이 사라진다. */}
       {!session.error && (
         <View style={[styles.sessionBar, { backgroundColor: c.backgroundElement, borderColor: c.border }]}>
+          {/* 일정에서 시작한 모임이면 어느 모임인지 붙여 준다 — 판이 그 일정에 묶이고 있음을
+              알 수 있어야, 나중에 "왜 여기 붙었지"가 되지 않는다. */}
+          {session.meetup && (
+            <View style={[styles.meetupTag, { borderColor: c.badgeRecommended }]}>
+              <Text style={[styles.caption, { color: c.badgeRecommended }]} numberOfLines={1}>
+                {session.meetup.title}
+              </Text>
+            </View>
+          )}
           <Text
             style={[
               styles.sessionText,
@@ -257,9 +348,9 @@ export default function RecommendScreen() {
               <Text
                 style={[
                   styles.caption,
-                  { color: confirmEndSession ? c.danger : c.textSecondary, fontWeight: '600' },
+                  { color: endConfirm.pendingId ? c.danger : c.textSecondary, fontWeight: '600' },
                 ]}>
-                {confirmEndSession ? '정말 마무리?' : '마무리'}
+                {endConfirm.pendingId ? '정말 마무리?' : '마무리'}
               </Text>
             </Pressable>
           )}
@@ -303,21 +394,21 @@ export default function RecommendScreen() {
               accessibilityRole="button"
               style={[
                 styles.endSessionButton,
-                { borderColor: confirmEndSession ? c.danger : c.border },
+                { borderColor: endConfirm.pendingId ? c.danger : c.border },
               ]}>
               <Text
                 style={[
                   styles.caption,
-                  { color: confirmEndSession ? c.danger : c.text, fontWeight: '600' },
+                  { color: endConfirm.pendingId ? c.danger : c.text, fontWeight: '600' },
                 ]}>
-                {confirmEndSession ? '정말 마무리할까요?' : '모임 마무리 🎉'}
+                {endConfirm.pendingId ? '정말 마무리할까요?' : '모임 마무리 🎉'}
               </Text>
             </Pressable>
           )}
         </View>
       )}
 
-      <Text style={[styles.h1, { color: c.text }]}>오늘 뭐 할까?</Text>
+      <Text style={[styles.h1, t.display, { color: c.text }]}>오늘 뭐 할까?</Text>
       <Text style={[styles.sub, { color: c.textSecondary }]}>
         조건을 고르면 지금 하기 좋은 순서로 보여드려요.
       </Text>
@@ -335,79 +426,64 @@ export default function RecommendScreen() {
 
       {/* 인원수는 사용자가 가장 확실히 아는 값이므로 항상 노출되는 1차 필터로 둔다. */}
       <Text style={[styles.groupLabel, { color: c.textSecondary }]}>몇 명이서?</Text>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
-        {PLAYER_OPTIONS.map((n) => (
-          <Chip
-            key={n}
-            label={n === 10 ? '10명+' : `${n}명`}
-            selected={filter.playerCount === n}
-            onPress={() => patch({ playerCount: filter.playerCount === n ? null : n })}
-          />
-        ))}
-      </ScrollView>
+      <ChipRow
+        items={PLAYER_OPTIONS.map((n) => ({
+          key: String(n),
+          label: n === 10 ? '10명+' : `${n}명`,
+          selected: filter.playerCount === n,
+          onPress: () => patch({ playerCount: filter.playerCount === n ? null : n }),
+        }))}
+      />
 
       <Text style={[styles.groupLabel, { color: c.textSecondary }]}>시간</Text>
-      <View style={styles.chipRow}>
-        {TIME_OPTIONS.map((o) => (
-          <Chip
-            key={o.value}
-            label={o.label}
-            selected={filter.maxPlaytime === o.value}
-            onPress={() => patch({ maxPlaytime: filter.maxPlaytime === o.value ? null : o.value })}
-          />
-        ))}
-      </View>
+      <ChipRow
+        items={TIME_OPTIONS.map((o) => ({
+          key: o.value,
+          label: o.label,
+          count: timeCounts[o.value],
+          selected: filter.playtimeBand === o.value,
+          onPress: () => patch({ playtimeBand: filter.playtimeBand === o.value ? null : o.value }),
+        }))}
+      />
 
       <Text style={[styles.groupLabel, { color: c.textSecondary }]}>난이도</Text>
-      <View style={styles.chipRow}>
-        {WEIGHT_OPTIONS.map((o) => {
+      <ChipRow
+        items={WEIGHT_OPTIONS.map((o) => {
           const on = filter.weightRange?.[0] === o.value[0] && filter.weightRange?.[1] === o.value[1];
-          return (
-            <Chip
-              key={o.label}
-              label={o.label}
-              selected={on}
-              onPress={() => patch({ weightRange: on ? null : o.value })}
-            />
-          );
+          return {
+            key: o.label,
+            label: o.label,
+            selected: on,
+            onPress: () => patch({ weightRange: on ? null : o.value }),
+          };
         })}
-      </View>
+      />
 
       <Text style={[styles.groupLabel, { color: c.textSecondary }]}>카테고리</Text>
-      <View style={styles.chipRow}>
-        {categories.map((v) => (
-          <Chip
-            key={v}
-            label={v}
-            selected={filter.categories.includes(v)}
-            count={categoryCounts[v]}
-            onPress={() => toggleTag('categories', v)}
-          />
-        ))}
-      </View>
+      <ChipRow
+        items={categories.map((v) => ({
+          key: v,
+          label: v,
+          count: categoryCounts[v],
+          selected: filter.categories.includes(v),
+          onPress: () => toggleTag('categories', v),
+        }))}
+      />
 
       <CollapsibleFilterSection
         label="테마"
         selectedCount={filter.themes.length}
         expanded={themeSectionOpen}
         onToggle={() => setThemeSectionOpen((v) => !v)}>
-        <View style={styles.chipRow}>
-          {themes.map((v) => (
-            <Chip
-              key={v}
-              label={v}
-              selected={filter.themes.includes(v)}
-              count={themeCounts[v]}
-              onPress={() => toggleTag('themes', v)}
-            />
-          ))}
-          {themesAll.length > TOP_OPTIONS && (
-            <Chip
-              label={showAllThemes ? '접기' : `더보기 (${themesAll.length - TOP_OPTIONS})`}
-              onPress={() => setShowAllThemes((v) => !v)}
-            />
-          )}
-        </View>
+        <ChipRow
+          items={themesAll.map((v) => ({
+            key: v,
+            label: v,
+            count: themeCounts[v],
+            selected: filter.themes.includes(v),
+            onPress: () => toggleTag('themes', v),
+          }))}
+        />
       </CollapsibleFilterSection>
 
       <CollapsibleFilterSection
@@ -415,36 +491,26 @@ export default function RecommendScreen() {
         selectedCount={filter.mechanics.length}
         expanded={mechanicsSectionOpen}
         onToggle={() => setMechanicsSectionOpen((v) => !v)}>
-        <View style={styles.chipRow}>
-          {mechanics.map((v) => (
-            <Chip
-              key={v}
-              label={v}
-              selected={filter.mechanics.includes(v)}
-              count={mechanicCounts[v]}
-              onPress={() => toggleTag('mechanics', v)}
-            />
-          ))}
-          {mechanicsAll.length > TOP_OPTIONS && (
-            <Chip
-              label={showAllMechanics ? '접기' : `더보기 (${mechanicsAll.length - TOP_OPTIONS})`}
-              onPress={() => setShowAllMechanics((v) => !v)}
-            />
-          )}
-        </View>
+        <ChipRow
+          items={mechanicsAll.map((v) => ({
+            key: v,
+            label: v,
+            count: mechanicCounts[v],
+            selected: filter.mechanics.includes(v),
+            onPress: () => toggleTag('mechanics', v),
+          }))}
+        />
       </CollapsibleFilterSection>
 
       <Text style={[styles.groupLabel, { color: c.textSecondary }]}>정렬</Text>
-      <View style={styles.chipRow}>
-        {SORTS.map((s) => (
-          <Chip
-            key={s.key}
-            label={s.label}
-            selected={filter.sort === s.key}
-            onPress={() => patch({ sort: s.key })}
-          />
-        ))}
-      </View>
+      <ChipRow
+        items={SORTS.map((o) => ({
+          key: o.key,
+          label: o.label,
+          selected: filter.sort === o.key,
+          onPress: () => patch({ sort: o.key }),
+        }))}
+      />
 
       <View style={styles.countRow}>
         <Text style={[styles.count, { color: c.text }]}>
@@ -496,7 +562,10 @@ export default function RecommendScreen() {
             game={item}
             playerCount={filter.playerCount}
             selected={item.id === selectedId}
+            liked={likes.mine(item.id)}
+            likeCount={likes.count(item.id)}
             onPress={() => setSelectedId(item.id)}
+            onToggleLike={me.isMember ? () => void likes.toggle(item.id) : undefined}
           />
         </View>
       )}
@@ -566,7 +635,12 @@ export default function RecommendScreen() {
               </Text>
             )}
             <Text style={[styles.recapLine, { color: c.textSecondary }]}>수고하셨어요! 🎉</Text>
-            <Chip label="모임 끝내기" selected onPress={finalizeSession} />
+            <View style={styles.recapActions}>
+              {me.isMember && (
+                <Chip label="피드에 남기기" selected onPress={writeRecap} />
+              )}
+              <Chip label="모임 끝내기" selected={!me.isMember} onPress={finalizeSession} />
+            </View>
           </Pressable>
         </Pressable>
       </Modal>
@@ -575,6 +649,7 @@ export default function RecommendScreen() {
 
   return (
     <View
+      {...endConfirm.bind}
       style={[styles.screen, { backgroundColor: c.background, paddingTop: insets.top }]}
       onLayout={onLayout}>
       {list}
@@ -585,7 +660,7 @@ export default function RecommendScreen() {
             game={selected}
             playerCount={filter.playerCount}
             onClose={() => setSelectedId(null)}
-            onEdit={() => setEditing(selected)}
+            onEdit={canEditGames ? () => setEditing(selected) : undefined}
           />
         )}
       </CenterModal>
@@ -664,6 +739,14 @@ const styles = StyleSheet.create({
   },
   recapTitle: { fontSize: 52, lineHeight: 68, fontFamily: 'Jua_400Regular' },
   recapLine: { ...Typography.subtitle, textAlign: 'center' },
+  meetupTag: {
+    borderWidth: 1,
+    borderRadius: Radius.full,
+    paddingHorizontal: Spacing.two,
+    paddingVertical: 2,
+    maxWidth: 140,
+  },
+  recapActions: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.two, justifyContent: 'center' },
   h1: { ...Typography.display, marginTop: Spacing.two },
   sub: { ...Typography.body, marginBottom: Spacing.two },
   groupLabel: { ...Typography.label, marginTop: Spacing.three },

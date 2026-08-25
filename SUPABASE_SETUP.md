@@ -106,6 +106,30 @@ node scripts/upload-images.mjs
 앱에서는 상단의 🔒에 아이디·비밀번호를 넣는다. 기기당 1회면 세션이 유지된다.
 비밀번호를 잊으면 대시보드 → Users에서 재설정한다 (메일 복구는 없다 — 가짜 도메인이다).
 
+## 7-2. 모임 커뮤니티 열기 (피드·일정)
+
+1. **SQL Editor**에서 두 파일을 순서대로 실행
+   - `supabase/migrations/20260825090000_community.sql` (테이블·정책)
+   - `supabase/migrations/20260825120000_join_code.sql` (고정 참여 코드 자리 만들기, 가입 1단계화)
+2. **Authentication → Sign In / Providers → "Allow new users to sign up" 켜기**
+   - 7-1에서 껐던 것을 되돌린다. 이제 가입은 열려 있어도 안전하다 —
+     **참여 코드가 맞아야 프로필이 생기고**, 프로필이 없으면 모임 글이 하나도 안 보인다(RLS).
+   - 같은 화면의 "Confirm email"은 **꺼 둔다**. 아이디가 가짜 도메인이라 확인 메일이 가지 않는다.
+3. 모임 사람은 앱에서 🔒 → **참여 코드로 가입** → 코드·이름·닉네임·아이디·비밀번호를 넣으면 끝.
+   로그인은 그다음부터 **아이디와 비밀번호만** 쓴다.
+
+기존 공용 계정은 마이그레이션이 자동으로 첫 회원으로 만들어 준다.
+
+**참여 코드는 마이그레이션이 `CHANGE-ME`로 만들어 둔다.** SQL Editor에서 실제 코드로 바꾼다:
+
+```sql
+update public.invite_codes set code = '<실제 코드>' where code = 'CHANGE-ME';
+-- 나중에 다시 바꿀 때는 where 절에 지금 코드를 넣는다
+```
+
+**코드를 이 저장소에 적지 않는다.** 저장소가 공개돼 있어서, 한 번 커밋하면 나중에 지워도
+커밋 기록에 남는다. 코드는 서버가 검증하고(`check_invite`) 앱 번들에도 들어 있지 않다.
+
 ## 7. 노션 데이터를 갱신했을 때
 
 노션에서 다시 내보내기 → zip을 `_workspace/00_input/`에 넣고 압축 해제 → 아래 실행 후, 생성된 `supabase/seed.sql`을 SQL Editor에서 다시 Run.

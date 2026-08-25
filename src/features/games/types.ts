@@ -45,13 +45,26 @@ export type Game = {
 /** 태블릿 가로에서 목록 옆에 붙는 상세 패널 폭. 레이아웃과 컬럼 계산이 같은 값을 봐야 한다. */
 export const DETAIL_PANE_WIDTH = 380;
 
-export type SortKey = 'recommended' | 'mostPlayed' | 'longestUnplayed' | 'shortest' | 'easiest';
+export type SortKey =
+  | 'recommended'
+  | 'mostLiked'
+  | 'mostPlayed'
+  | 'longestUnplayed'
+  | 'shortest'
+  | 'easiest';
+
+/**
+ * 플레이타임 구간. 겹치지 않는 띠라서 '1시간'을 골라도 30분짜리는 나오지 않는다.
+ * 상한 방식(30분 이하 / 60분 이하 …)은 짧은 게임이 모든 구간에 계속 끼어들어,
+ * "한 시간쯤 걸리는 걸 하고 싶다"는 실제 의도를 표현하지 못했다.
+ */
+export type PlaytimeBand = 'short' | 'medium' | 'long' | 'epic';
 
 export type GameFilter = {
   /** 함께 플레이할 인원. null이면 인원 조건 없음 */
   playerCount: number | null;
-  /** 상한 플레이타임(분). null이면 시간 조건 없음 */
-  maxPlaytime: number | null;
+  /** 플레이타임 구간. null이면 시간 조건 없음 */
+  playtimeBand: PlaytimeBand | null;
   /** [최소, 최대] 난이도. null이면 난이도 조건 없음 */
   weightRange: [number, number] | null;
   categories: string[];
@@ -64,7 +77,7 @@ export type GameFilter = {
 
 export const EMPTY_FILTER: GameFilter = {
   playerCount: null,
-  maxPlaytime: null,
+  playtimeBand: null,
   weightRange: null,
   categories: [],
   themes: [],

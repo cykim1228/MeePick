@@ -6,7 +6,7 @@ export type MemberRow = Database['public']['Tables']['members']['Row'];
 export type PlayRow = Database['public']['Tables']['plays']['Row'];
 
 export function toMember(row: MemberRow): Member {
-  return { id: row.id, name: row.name };
+  return { id: row.id, name: row.name, profileId: row.profile_id ?? null };
 }
 
 /**
@@ -59,5 +59,7 @@ export function toPlay(row: PlayRow): Play {
     scores: parseScores((row as { scores?: Json }).scores),
     startedAt: row.started_at,
     endedAt: row.ended_at,
+    // 이 컬럼이 생기기 전에 만들어진 행에는 값이 없다. undefined가 새어 나가지 않게 null로 굳힌다.
+    meetupId: row.meetup_id ?? null,
   };
 }

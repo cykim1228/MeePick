@@ -41,7 +41,8 @@ log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"; }
 status=0
 summary=""
 
-for table in games members plays; do
+# 새 테이블을 만들면 여기에 추가한다 — 빠뜨리면 백업에서 조용히 누락된다.
+for table in games members plays profiles posts post_likes post_comments meetups meetup_rsvps game_likes; do
   offset=0; part=1; rows=0; ok=1
   while :; do
     if [ "$part" -eq 1 ]; then file="$OUT/${table}_${STAMP}.json"

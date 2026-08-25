@@ -1,10 +1,11 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { Chip } from '@/components/chip';
 import { Radius, Spacing, TouchTarget, Typography } from '@/constants/theme';
 import { useSession } from '@/features/plays/hooks';
 import { useTheme } from '@/hooks/use-theme';
+import { useType } from '@/hooks/use-type';
 
 type Props = {
   /** 이미 선택돼 있던 멤버 (변경 모드) */
@@ -23,6 +24,7 @@ type Props = {
  */
 export function SessionSetup({ initialIds, confirmLabel = '시작하기', onConfirm, onSkip, onClose }: Props) {
   const c = useTheme();
+  const t = useType();
   const { members, addMember, removeMember, renameMember, pending, actionError } = useSession();
 
   const [selected, setSelected] = useState<string[]>(initialIds);
@@ -30,6 +32,18 @@ export function SessionSetup({ initialIds, confirmLabel = '시작하기', onConf
   const [managing, setManaging] = useState(false);
   /** 관리 모드에서 편집 중인 멤버. name은 입력 초안이다. */
   const [editing, setEditing] = useState<{ id: string; name: string } | null>(null);
+
+  /**
+   * 가입한 사람은 목록에 저절로 올라온다(가입 시 멤버 행이 함께 생긴다).
+   * 손님은 로그인 없이 한 판 낀 사람이라 여기서 이름만 적어 추가한다.
+   */
+  const { joined, guests } = useMemo(
+    () => ({
+      joined: members.filter((m) => m.profileId !== null),
+      guests: members.filter((m) => m.profileId === null),
+    }),
+    [members]
+  );
 
   const toggle = (id: string) =>
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
@@ -64,7 +78,7 @@ export function SessionSetup({ initialIds, confirmLabel = '시작하기', onConf
     <View style={styles.root}>
       <ScrollView contentContainerStyle={styles.content}>
         <View style={styles.headerRow}>
-          <Text style={[styles.h1, { color: c.text }]}>오늘 누구랑 하나요?</Text>
+          <Text style={[styles.h1, t.display, { color: c.text }]}>오늘 누구랑 하나요?</Text>
           {onClose && (
             <Pressable onPress={onClose} accessibilityRole="button" accessibilityLabel="닫기" style={styles.close}>
               <Text style={[styles.h1, { color: c.textSecondary }]}>✕</Text>
@@ -80,7 +94,7 @@ export function SessionSetup({ initialIds, confirmLabel = '시작하기', onConf
             value={newName}
             onChangeText={setNewName}
             onSubmitEditing={() => void submitName()}
-            placeholder="새 멤버 이름"
+            placeholder="손님 이름 (가입 안 한 사람)"
             placeholderTextColor={c.textSecondary}
             style={[
               styles.input,
@@ -96,23 +110,43 @@ export function SessionSetup({ initialIds, confirmLabel = '시작하기', onConf
           </Pressable>
         </View>
 
-        {members.length > 0 && (
-          <View style={styles.chipRow}>
-            {members.map((m) => (
-              <Chip
-                key={m.id}
-                label={managing ? `✎ ${m.name}` : m.name}
-                selected={managing ? editing?.id === m.id : selected.includes(m.id)}
-                onPress={() => {
-                  if (managing) {
-                    setEditing({ id: m.id, name: m.name });
-                  } else {
-                    toggle(m.id);
-                  }
-                }}
-              />
-            ))}
-          </View>
+        {joined.length > 0 && (
+          <>
+            <Text style={[styles.sectionLabel, { color: c.textSecondary }]}>회원</Text>
+            <View style={styles.chipRow}>
+              {joined.map((m) => (
+                <Chip
+                  key={m.id}
+                  label={m.name}
+                  selected={selected.includes(m.id)}
+                  // 회원 이름은 프로필의 닉네임을 따라간다. 여기서 고치면 두 곳이 갈라진다.
+                  onPress={() => toggle(m.id)}
+                />
+              ))}
+            </View>
+          </>
+        )}
+
+        {guests.length > 0 && (
+          <>
+            <Text style={[styles.sectionLabel, { color: c.textSecondary }]}>손님</Text>
+            <View style={styles.chipRow}>
+              {guests.map((m) => (
+                <Chip
+                  key={m.id}
+                  label={managing ? `✎ ${m.name}` : m.name}
+                  selected={managing ? editing?.id === m.id : selected.includes(m.id)}
+                  onPress={() => {
+                    if (managing) {
+                      setEditing({ id: m.id, name: m.name });
+                    } else {
+                      toggle(m.id);
+                    }
+                  }}
+                />
+              ))}
+            </View>
+          </>
         )}
 
         {managing && editing && (
@@ -159,11 +193,11 @@ export function SessionSetup({ initialIds, confirmLabel = '시작하기', onConf
 
         {members.length === 0 && (
           <Text style={[styles.hint, { color: c.textSecondary }]}>
-            아직 등록된 멤버가 없어요. 위에서 이름을 추가하세요.
+            아직 멤버가 없어요. 가입하면 자동으로 올라오고, 손님은 위에서 이름을 적어 추가하세요.
           </Text>
         )}
 
-        {members.length > 0 && (
+        {guests.length > 0 && (
           <Pressable
             onPress={() => {
               setManaging((v) => !v);
@@ -172,7 +206,7 @@ export function SessionSetup({ initialIds, confirmLabel = '시작하기', onConf
             accessibilityRole="button"
             style={styles.manageToggle}>
             <Text style={[styles.hint, { color: c.textSecondary }]}>
-              {managing ? '관리 끝내기' : '멤버 이름 바꾸기·삭제'}
+              {managing ? '관리 끝내기' : '손님 이름 바꾸기·삭제'}
             </Text>
           </Pressable>
         )}
@@ -232,6 +266,7 @@ const styles = StyleSheet.create({
   editActions: { flexDirection: 'row', gap: Spacing.four },
   editAction: { minHeight: TouchTarget.min, justifyContent: 'center' },
   manageToggle: { alignSelf: 'flex-start', minHeight: TouchTarget.min, justifyContent: 'center' },
+  sectionLabel: { ...Typography.label, marginTop: Spacing.two },
   hint: { ...Typography.caption },
   count: { ...Typography.subtitle, marginTop: Spacing.two },
   footer: {

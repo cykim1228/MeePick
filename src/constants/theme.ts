@@ -34,6 +34,11 @@ export const Colors = {
     /** 노션에 없어 채워 넣은 추정값 */
     badgeEstimated: '#8B8272',
     danger: '#B3261E',
+    /** 상세 태그 — 기준(필드)별 고정색. 인원은 badgeBest/badgeRecommended를 재사용한다. */
+    tagTime: '#3E7C7B',
+    tagWeight: '#7B5EA7',
+    tagTheme: '#5C8A3D',
+    tagMechanic: '#A34E68',
   },
   dark: {
     text: '#F2EBDF',
@@ -49,6 +54,10 @@ export const Colors = {
     badgeNew: '#DFA45C',
     badgeEstimated: '#9C9384',
     danger: '#F2A099',
+    tagTime: '#82C7C5',
+    tagWeight: '#B9A6DF',
+    tagTheme: '#A9CB82',
+    tagMechanic: '#DE94AC',
   },
 } as const;
 
@@ -71,6 +80,22 @@ export const Typography = {
   caption: { fontSize: 14, lineHeight: 20, fontWeight: '400' },
   /** 필터 그룹명 같은 섹션 라벨. 본문과 구분되도록 작고 단단하게. */
   label: { fontSize: 13, lineHeight: 18, fontWeight: '700', letterSpacing: 0.5 },
+} as const;
+
+/**
+ * 폰에서 쓰는 한 단계 작은 크기.
+ *
+ * 위 Typography는 태블릿을 팔 길이에서 보는 기준이라, 그대로 폰에 쓰면 제목이 두 줄로
+ * 접히고 목록 한 줄에 들어갈 정보가 줄어든다. 폰은 눈에서 30cm라 작아도 읽힌다.
+ * 화면 코드는 `useType()`으로 받아 쓰고, 여기 숫자를 직접 참조하지 않는다.
+ */
+export const TypographyCompact = {
+  display: { fontSize: 22, lineHeight: 30, fontWeight: '400', fontFamily: 'Jua_400Regular' },
+  title: { fontSize: 18, lineHeight: 26, fontWeight: '400', fontFamily: 'Jua_400Regular' },
+  subtitle: { fontSize: 16, lineHeight: 23, fontWeight: '400', fontFamily: 'Jua_400Regular' },
+  body: { fontSize: 14, lineHeight: 20, fontWeight: '400' },
+  caption: { fontSize: 12, lineHeight: 17, fontWeight: '400' },
+  label: { fontSize: 11, lineHeight: 15, fontWeight: '700', letterSpacing: 0.4 },
 } as const;
 
 /** 공용 기기에서 서서 누르는 경우가 있어 주요 액션은 크게 잡는다. */

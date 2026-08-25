@@ -55,11 +55,32 @@ EXPO_PUBLIC_SUPABASE_ANON_KEY=<publishable 키>
 ## 2. 빌드 + 전송 (PC)
 
 ```powershell
-.\deploy\publish-nas.ps1 -Target \\<NAS이름>\docker\meepick
+.\deploy\publish-nas.ps1 -Target \\<NAS이름>\docker\meepick -MediaDir /volume1/photo/Server
 ```
 
-`dist/`를 새로 빌드하고 `nginx.conf`·`docker-compose.yml`과 함께 NAS 공유 폴더로 복사한다.
-`dist`는 미러링이라 예전 해시 번들이 쌓이지 않는다.
+`dist/`를 새로 빌드하고 `nginx.conf`·`docker-compose.yml`·`media-server.mjs`와 함께
+NAS 공유 폴더로 복사한다. `dist`는 미러링이라 예전 해시 번들이 쌓이지 않는다.
+
+### `-MediaDir` — 모임 사진이 쌓일 곳
+
+**SMB 경로가 아니라 NAS 안쪽 경로**다. 컨테이너가 볼륨으로 붙이기 때문이다.
+Photo 공유 폴더가 어느 볼륨에 있는지는 NAS만 아니, 한 번 확인해서 넘긴다:
+
+```bash
+ls -d /volume*/photo/Server
+```
+
+한 번 주면 대상 폴더의 `.env`에 남아, 다음 배포부터는 생략해도 그 값을 이어 쓴다.
+잘못 잡으면 컨테이너는 멀쩡히 뜨고 사진만 엉뚱한 곳에 쌓이므로, 미디어 서버가 시작할 때
+표식 파일(`.meepick-media`)을 확인해 로그로 알려 준다:
+
+```bash
+docker logs meepick-media | head -3
+# [media] ✅ /data — Photo/Server 폴더를 찾았습니다.
+```
+
+⚠️ 표식이 없다는 경고가 뜨면 `.env`의 `MEDIA_DIR`을 고치고
+`docker-compose up -d` 를 다시 실행한다.
 
 > "이 시스템에서 스크립트를 실행할 수 없으므로" 오류가 나면 실행 정책 때문이다.
 > 한 번만 풀어 주면 된다: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
@@ -127,6 +148,13 @@ EXPO_PUBLIC_SUPABASE_ANON_KEY=<publishable 키>
 
 끝. nginx는 재시작할 필요 없다 — 같은 폴더를 서빙하므로 새 파일이 즉시 반영된다.
 태블릿에서 새로고침하면 된다.
+
+> `media-server.mjs`나 `docker-compose.yml`이 바뀐 배포라면 그때만
+> `docker-compose up -d`를 한 번 더 돌린다(컨테이너가 파일을 마운트해 들고 있어서다).
+
+> **오프라인 셸**: 배포본은 서비스 워커(`public/sw.js`)를 등록해 앱 껍데기와 사진을
+> 캐시한다. NAS가 꺼져 있어도 화면은 뜨고, 데이터만 "불러올 수 없음"으로 나온다.
+> 워커 자체는 `nginx.conf`에서 캐시 금지라, 새 배포가 항상 이긴다.
 
 ---
 

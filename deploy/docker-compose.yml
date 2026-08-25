@@ -1,6 +1,11 @@
-# MeePick 웹 서빙 — Synology Container Manager에서 이 파일로 프로젝트 생성.
+# MeePick 웹 서빙 — 리포지토리를 통째로 NAS에 둘 때 쓰는 구성(dist가 한 단계 위에 있다).
+# PC에서 빌드해 밀어 넣는 평소 경로는 deploy/nas/docker-compose.yml 쪽이다.
+#
 # 빌드 산출물(dist/)을 nginx가 읽기 전용으로 서빙한다. 재빌드하면 자동 반영(재시작 불필요).
 # 8088은 DSM 역방향 프록시(https 입구)가 쓰므로 컨테이너는 8089에 둔다 — deploy/https.md 참조.
+#
+# MEDIA_DIR 은 사진이 쌓일 NAS 안쪽 경로다. 볼륨이 다르면 환경변수로 덮어쓴다.
+# 확인: ls -d /volume*/photo/Server
 services:
   meepick-web:
     image: nginx:alpine
@@ -10,4 +15,22 @@ services:
     volumes:
       - ../dist:/usr/share/nginx/html:ro
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # 사진은 읽기 전용으로만 붙인다 — 쓰기는 아래 미디어 서버 몫이다.
+      - ${MEDIA_DIR:-/volume1/photo/Server}:/srv/media:ro
+    depends_on:
+      - meepick-media
+    restart: unless-stopped
+
+  # 사진 업로드 전용. 의존성이 없어서 이미지를 굽지 않고 파일 한 장만 얹는다.
+  meepick-media:
+    image: node:22-alpine
+    container_name: meepick-media
+    command: node /app/media-server.mjs
+    working_dir: /app
+    volumes:
+      - ./media-server.mjs:/app/media-server.mjs:ro
+      - ${MEDIA_DIR:-/volume1/photo/Server}:/data
+    env_file:
+      # 리포지토리의 .env를 그대로 쓴다(EXPO_PUBLIC_ 이름도 미디어 서버가 알아본다).
+      - ../.env
     restart: unless-stopped

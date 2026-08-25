@@ -3,6 +3,11 @@
 export type Member = {
   id: string;
   name: string;
+  /**
+   * 앱 회원과 연결된 멤버면 그 회원 id. 가입하면 자동으로 멤버가 생기고 연결된다.
+   * null이면 손님 — 로그인 없이 한 판 낀 사람이라 이름만 있다.
+   */
+  profileId: string | null;
 };
 
 /**
@@ -34,4 +39,6 @@ export type Play = {
   scores: Record<string, number>;
   startedAt: string;
   endedAt: string | null;
+  /** 이 판이 속한 모임 일정. 일정 없이 그냥 모인 날은 null */
+  meetupId: string | null;
 };

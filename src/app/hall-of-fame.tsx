@@ -14,6 +14,7 @@ import {
   computeTopGames,
 } from '@/features/plays/stats';
 import { useTheme } from '@/hooks/use-theme';
+import { useType } from '@/hooks/use-type';
 import { localDateOf } from '@/lib/dates';
 
 const MEDALS = ['🥇', '🥈', '🥉'];
@@ -32,6 +33,7 @@ const SEGMENTS: { key: Segment; label: string }[] = [
  */
 export default function HallOfFameScreen() {
   const c = useTheme();
+  const t = useType();
   const insets = useSafeAreaInsets();
   const { members } = useSession();
   const { plays, loading, error, reload } = usePlayHistory();
@@ -80,7 +82,7 @@ export default function HallOfFameScreen() {
     <View style={[styles.screen, { backgroundColor: c.background, paddingTop: insets.top }]}>
       <ScrollView
         contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + Spacing.six }]}>
-        <Text style={[styles.h1, { color: c.text }]}>명예의 전당</Text>
+        <Text style={[styles.h1, t.display, { color: c.text }]}>명예의 전당</Text>
 
         <View style={styles.chipRow}>
           {SEGMENTS.map((s) => (

@@ -8,6 +8,7 @@ import { useEditGame } from '@/features/games/hooks';
 import type { GameInput } from '@/features/games/mappers';
 import type { Game } from '@/features/games/types';
 import { useSession } from '@/features/plays/hooks';
+import { useConfirmOnce } from '@/hooks/use-confirm-once';
 import { useTheme } from '@/hooks/use-theme';
 
 const PLAYER_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
@@ -18,16 +19,18 @@ type Props = {
   game: Game | null;
   /** 카테고리 선택지. 기존 목록에서 뽑아 넘긴다. */
   categoryOptions: string[];
+  /** 새 게임의 '지금 집에 있음' 초기값. 위시리스트에서 추가할 때 false로 넘긴다. */
+  defaultOwned?: boolean;
   onClose: () => void;
   onSaved?: (game: Game) => void;
   onDeleted?: () => void;
 };
 
-function initialInput(game: Game | null): GameInput {
+function initialInput(game: Game | null, defaultOwned: boolean): GameInput {
   return {
     titleKo: game?.titleKo ?? '',
     titleEn: game?.titleEn ?? null,
-    owned: game?.owned ?? true,
+    owned: game?.owned ?? defaultOwned,
     playerCounts: game?.playerCounts ?? [],
     recommendedCounts: game?.recommendedCounts ?? [],
     bestCount: game?.bestCount ?? null,
@@ -46,6 +49,7 @@ export function GameForm({
   visible,
   game,
   categoryOptions,
+  defaultOwned = true,
   onClose,
   onSaved,
   onDeleted,
@@ -56,9 +60,10 @@ export function GameForm({
   const { activePlay } = useSession();
 
   // game이 바뀌면 폼을 새로 만든다. key로 리마운트시키는 쪽이 useEffect 동기화보다 단순하다.
-  const [input, setInput] = useState<GameInput>(() => initialInput(game));
+  const [input, setInput] = useState<GameInput>(() => initialInput(game, defaultOwned));
   const [themesText, setThemesText] = useState(() => (game?.themes ?? []).join(', '));
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  // 삭제 확인은 폼 안 다른 곳을 건드리면 풀린다.
+  const delConfirm = useConfirmOnce<'del'>();
 
   const patch = (next: Partial<GameInput>) => setInput((v) => ({ ...v, ...next }));
 
@@ -95,22 +100,22 @@ export function GameForm({
   // plays 스토어는 모른 채 남아, '게임중' 배너가 유령이 된다. 삭제 자체를 막는다.
   const deleteBlocked = game !== null && activePlay?.gameId === game.id;
 
-  const destroy = async () => {
+  const destroy = () => {
     if (!game || deleteBlocked) return;
-    if (!confirmDelete) {
-      setConfirmDelete(true);
-      return;
-    }
-    const ok = await remove(game.id);
-    if (ok !== null) {
-      onDeleted?.();
-      onClose();
-    }
+    delConfirm.press('del', async () => {
+      const ok = await remove(game.id);
+      if (ok !== null) {
+        onDeleted?.();
+        onClose();
+      }
+    });
   };
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-      <View style={[styles.root, { backgroundColor: c.background, paddingTop: insets.top }]}>
+      <View
+        {...delConfirm.bind}
+        style={[styles.root, { backgroundColor: c.background, paddingTop: insets.top }]}>
         <View style={[styles.header, { borderBottomColor: c.border }]}>
           <Text style={[styles.title, { color: c.text }]}>{game ? '게임 수정' : '게임 추가'}</Text>
           <Pressable onPress={onClose} accessibilityRole="button" accessibilityLabel="닫기" style={styles.close}>
@@ -292,7 +297,7 @@ export function GameForm({
                 { borderColor: deleteBlocked ? c.border : c.danger, opacity: deleteBlocked ? 0.5 : 1 },
               ]}>
               <Text style={[styles.buttonText, { color: deleteBlocked ? c.textSecondary : c.danger }]}>
-                {deleteBlocked ? '게임중이라 삭제 불가' : confirmDelete ? '정말 삭제할까요?' : '삭제'}
+                {deleteBlocked ? '게임중이라 삭제 불가' : delConfirm.pendingId ? '정말 삭제할까요?' : '삭제'}
               </Text>
             </Pressable>
           )}

@@ -5,11 +5,58 @@ import { supabase } from '@/lib/supabase';
 import { toMember, toPlay, toRoundsJson, type MemberRow, type PlayRow } from './mappers';
 import type { Member, Play, PlayRound } from './types';
 
-/** 반환: Member[] (이름순) */
+/**
+ * 반환: Member[] (이름순).
+ * 숨긴 멤버는 뺀다 — 운영 계정처럼 실제로 게임하지 않는 사람이 오늘의 멤버 후보에
+ * 섞이면 인원수가 어긋난다. 지난 기록에 이름을 붙일 때는 이 목록을 쓰지 않으므로
+ * 과거 참가자 표시에는 영향이 없다.
+ */
 export async function fetchMembers(): Promise<Member[]> {
-  const { data, error } = await supabase.from('members').select('*').order('name');
+  const { data, error } = await supabase
+    .from('members')
+    .select('*')
+    .eq('hidden', false)
+    .order('name');
   if (error) throw new Error(error.message);
   return (data ?? []).map((row) => toMember(row as MemberRow));
+}
+
+/**
+ * 계정이 없는 '손님' 멤버들. 회원 관리에서 "이 계정 = 저 손님"을 이어 줄 때 후보로 쓴다.
+ * 숨긴 멤버는 애초에 사람이 아니므로 뺀다.
+ */
+export async function fetchGuestMembers(): Promise<Member[]> {
+  const { data, error } = await supabase
+    .from('members')
+    .select('*')
+    .is('profile_id', null)
+    .eq('hidden', false)
+    .order('name');
+  if (error) throw new Error(error.message);
+  return (data ?? []).map((row) => toMember(row as MemberRow));
+}
+
+/**
+ * 손님 기록을 계정에 잇는다(모임장 전용).
+ *
+ * 손님 행을 살리고 가입 때 생긴 빈 행을 지우는 방향이다 — 지난 판들이 손님 행에
+ * 걸려 있어서, 반대로 하면 plays.member_ids와 라운드 jsonb 안의 uuid를 전부 갈아야 한다.
+ * 판단이 필요한 경우(그 계정에 이미 기록이 있음)는 서버가 거절한다.
+ */
+export async function linkGuestToProfile(guestId: string, profileId: string): Promise<Member> {
+  await requireAuth();
+  const { data, error } = await supabase.rpc('link_guest_to_profile', {
+    p_guest_id: guestId,
+    p_profile_id: profileId,
+  });
+  if (error) {
+    if (error.code === 'PGRST202')
+      throw new Error(
+        '연결 함수가 아직 없습니다. supabase/migrations/20260827090000_meetup_sessions.sql 을 실행하세요.'
+      );
+    throw new Error(error.message);
+  }
+  return toMember(data as MemberRow);
 }
 
 /** 반환: Member (생성된 행). 같은 이름은 23505로 거부된다. */
@@ -103,12 +150,17 @@ export async function fetchPlayCounts(): Promise<Map<string, number>> {
  * 빠른 기록('오늘 이거 했어요'). 반환: Play (곧바로 끝난 상태의 행)
  * plays 행 생성과 last_played_at 갱신을 서버에서 한 번에 — 나누면 횟수와 날짜가 어긋날 수 있다.
  */
-export async function logPlay(gameId: string, memberIds: string[]): Promise<Play> {
+export async function logPlay(
+  gameId: string,
+  memberIds: string[],
+  meetupId: string | null = null
+): Promise<Play> {
   await requireAuth();
   const { data, error } = await supabase.rpc('log_play', {
     p_game_id: gameId,
     p_member_ids: memberIds,
     p_played_on: localToday(),
+    p_meetup_id: meetupId,
   });
   if (error) {
     if (error.code === 'PGRST202')
@@ -184,17 +236,26 @@ export async function fetchRecentPlays(gameId: string, limit = 3): Promise<Play[
 }
 
 /** 게임 시작. 반환: Play (게임중 상태의 새 플레이) */
-export async function startPlay(gameId: string, memberIds: string[]): Promise<Play> {
+export async function startPlay(
+  gameId: string,
+  memberIds: string[],
+  meetupId: string | null = null
+): Promise<Play> {
   await requireAuth();
   const { data, error } = await supabase
     .from('plays')
-    .insert({ game_id: gameId, member_ids: memberIds })
+    .insert({ game_id: gameId, member_ids: memberIds, meetup_id: meetupId })
     .select('*')
     .single();
   if (error) {
     // DB의 부분 unique 인덱스가 활성 플레이를 한 판으로 강제한다. 다른 탭/기기에서 이미 시작한 경우.
     if (error.code === '23505')
       throw new Error('이미 진행 중인 게임이 있습니다. 다른 기기에서 시작했을 수 있어요 — 새로고침 후 확인하세요.');
+    // 일정 연결 칼럼이 아직 없는 DB. 원인을 못 알아보면 '게임 시작이 안 된다'로만 보인다.
+    if (/meetup_id/.test(error.message))
+      throw new Error(
+        '일정 연결 칼럼이 아직 없습니다. supabase/migrations/20260827090000_meetup_sessions.sql 을 SQL Editor에서 실행하세요.'
+      );
     throw new Error(error.message);
   }
   return toPlay(data as PlayRow);

@@ -18,7 +18,8 @@ export function toAuthEmail(idOrEmail: string): string {
   return trimmed.includes('@') ? trimmed : `${trimmed}@${ID_DOMAIN}`;
 }
 
-export const authRequiredMessage = '기록·수정에는 로그인이 필요합니다 — 상단의 🔒를 눌러 주세요.';
+// 자물쇠 위치는 화면 크기에 따라 위/아래로 바뀐다. 방향을 지목하지 않는다.
+export const authRequiredMessage = '기록·수정에는 로그인이 필요합니다 — 🔒 를 눌러 주세요.';
 
 /**
  * 쓰기 쿼리 첫 줄에서 부른다. 최종 방어선은 RLS이고, 이 가드는 UX 장치다 —
@@ -38,6 +39,26 @@ export async function signIn(idOrEmail: string, password: string): Promise<void>
   if (error) {
     if (/invalid login credentials/i.test(error.message))
       throw new Error('아이디 또는 비밀번호가 맞지 않습니다.');
+    throw new Error(error.message);
+  }
+}
+
+/**
+ * 계정 만들기. 가입 자체는 인터넷에 열려 있지만, 이것만으로는 아무것도 못 본다 —
+ * 초대 코드를 써서 profiles 행이 생겨야 회원이다(supabase/migrations/…_community.sql).
+ * 그래서 가입을 열어도 모임 글은 안전하다.
+ */
+export async function signUp(idOrEmail: string, password: string): Promise<void> {
+  const { error } = await supabase.auth.signUp({
+    email: toAuthEmail(idOrEmail),
+    password,
+  });
+  if (error) {
+    if (/already registered/i.test(error.message)) throw new Error('이미 있는 아이디입니다.');
+    if (/at least|password/i.test(error.message))
+      throw new Error('비밀번호는 6자 이상이어야 합니다.');
+    if (/signups not allowed/i.test(error.message))
+      throw new Error('가입이 잠겨 있습니다. 관리자에게 문의하세요.');
     throw new Error(error.message);
   }
 }

@@ -24,7 +24,15 @@ param(
     [string] $Target,
 
     # 이미 빌드한 dist/ 를 그대로 올리고 싶을 때.
-    [switch] $SkipBuild
+    [switch] $SkipBuild,
+
+    <#
+      모임 사진이 쌓일 NAS 폴더의 **NAS 안쪽 경로**. SMB 경로가 아니다.
+      컨테이너가 볼륨으로 붙이므로 /volume3/photo/Server 처럼 실제 경로여야 한다.
+      한 번 주면 대상 폴더의 .env 에 남아, 다음부터는 생략해도 그 값을 이어 쓴다.
+      확인: ssh로 들어가 `ls -d /volume*/photo/Server`
+    #>
+    [string] $MediaDir
 )
 
 $ErrorActionPreference = 'Stop'
@@ -84,19 +92,38 @@ else {
     Write-Host "웹 빌드 중..." -ForegroundColor Cyan
     Push-Location $root
     try {
+        <#
+          종료 코드만 믿지 않는다. expo export는 dist를 다 만든 뒤 정리 단계에서 죽으며
+          0이 아닌 코드를 남기는 일이 있고(특히 dev 서버가 함께 떠 있을 때), 그때 빌드를
+          실패로 처리하면 멀쩡한 산출물을 두고 배포가 조용히 건너뛰어진다.
+          그래서 '결과물이 쓸 만한가'를 최종 판정 기준으로 삼는다.
+        #>
+        # expo는 진행 상황을 stderr로 흘리는데, ErrorActionPreference가 Stop이면
+        # PowerShell이 그것을 '오류'로 보고 빌드를 중간에 끊는다(모듈이 절반만 묶인
+        # 산출물이 나오거나 dist가 아예 안 생긴다). 이 구간만 Continue로 낮춘다.
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
         & npx expo export --platform web
-        if ($LASTEXITCODE -ne 0) { throw "expo export 실패 (exit $LASTEXITCODE)" }
+        $exportExit = $LASTEXITCODE
+        $ErrorActionPreference = $prevEap
 
         if (-not (Test-EnvInlined $distPath $envValues.Values)) {
-            Write-Host "번들에 .env 값이 없습니다 — Metro 캐시가 오래됐습니다. --clear로 재빌드합니다." -ForegroundColor Yellow
-            Remove-Item $distPath -Recurse -Force
+            Write-Host "번들이 비었거나 .env 값이 없습니다 — --clear로 재빌드합니다." -ForegroundColor Yellow
+            if (Test-Path $distPath) { Remove-Item $distPath -Recurse -Force }
 
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
             & npx expo export --platform web --clear
-            if ($LASTEXITCODE -ne 0) { throw "expo export --clear 실패 (exit $LASTEXITCODE)" }
+            $exportExit = $LASTEXITCODE
+            $ErrorActionPreference = $prevEap
 
             if (-not (Test-EnvInlined $distPath $envValues.Values)) {
-                throw "재빌드 후에도 번들에 .env 값이 없습니다. .env 인코딩(BOM 없는 UTF-8)과 EXPO_PUBLIC_ 접두사를 확인하세요."
+                throw "빌드에 실패했습니다 (exit $exportExit). dev 서버가 떠 있으면 먼저 끄고 다시 시도하세요."
             }
+        }
+
+        if ($exportExit -ne 0) {
+            Write-Host "expo export가 $exportExit 로 끝났지만 산출물은 정상입니다 — 그대로 진행합니다." -ForegroundColor Yellow
         }
     }
     finally {
@@ -129,6 +156,35 @@ if ($LASTEXITCODE -ge 8) { throw "robocopy 실패 (exit $LASTEXITCODE)" }
 
 Copy-Item (Join-Path $PSScriptRoot 'nginx.conf') $Target -Force
 Copy-Item (Join-Path $PSScriptRoot 'nas\docker-compose.yml') $Target -Force
+# 미디어 서버도 LF로 쓴다 — node는 CRLF를 신경 쓰지 않지만 alpine에서 편집할 때를 대비한다.
+$mediaText = ([System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'media-server.mjs'))) -replace "`r`n", "`n"
+[System.IO.File]::WriteAllText((Join-Path $Target 'media-server.mjs'), $mediaText, (New-Object System.Text.UTF8Encoding($false)))
+
+<#
+  compose용 .env — MEDIA_DIR(볼륨 경로)와 미디어 서버가 쓸 Supabase 값이 들어간다.
+
+  MEDIA_DIR은 NAS만 아는 값이라 매번 덮어쓰면 안 된다. -MediaDir 을 주면 그 값으로
+  바꾸고, 안 주면 이미 있는 값을 그대로 이어 쓴다. 둘 다 없으면 가장 흔한 경로를
+  깔아 두되, 미디어 서버가 뜰 때 표식 파일로 검사해 틀리면 로그로 알린다.
+#>
+$composeEnvPath = Join-Path $Target '.env'
+$existingMedia = $null
+if (Test-Path $composeEnvPath) {
+    $line = Get-Content $composeEnvPath | Where-Object { $_ -match '^\s*MEDIA_DIR\s*=' } | Select-Object -First 1
+    if ($line) { $existingMedia = ($line -split '=', 2)[1].Trim() }
+}
+$mediaPath = if ($MediaDir) { $MediaDir } elseif ($existingMedia) { $existingMedia } else { '/volume1/photo/Server' }
+
+$composeEnv = @(
+    # 주석은 ASCII로 둔다 — 이 파일을 다시 읽어 MEDIA_DIR을 이어 쓰는데,
+    # PowerShell 5.1의 Get-Content는 UTF-8을 ANSI로 읽어 한글이 깨진 채 비교된다.
+    "# Written by publish-nas.ps1. Edit MEDIA_DIR by hand; later deploys keep it.",
+    "MEDIA_DIR=$mediaPath",
+    "SUPABASE_URL=$($envValues['EXPO_PUBLIC_SUPABASE_URL'])",
+    "SUPABASE_ANON_KEY=$($envValues['EXPO_PUBLIC_SUPABASE_ANON_KEY'])"
+) -join "`n"
+[System.IO.File]::WriteAllText($composeEnvPath, "$composeEnv`n", (New-Object System.Text.UTF8Encoding($false)))
+Write-Host "사진 저장 위치(MEDIA_DIR): $mediaPath" -ForegroundColor Cyan
 
 # 백업 스크립트 — CRLF가 섞이면 NAS의 sh가 해석하지 못하므로 LF로 강제해서 쓴다.
 $backupText = ([System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'backup-supabase.sh'))) -replace "`r`n", "`n"

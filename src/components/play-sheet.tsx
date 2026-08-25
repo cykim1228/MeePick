@@ -24,6 +24,7 @@ import { useGames } from '@/features/games/hooks';
 import { useSession } from '@/features/plays/hooks';
 import type { Member, PlayRound } from '@/features/plays/types';
 import { useElapsedMinutes } from '@/hooks/use-elapsed-minutes';
+import { useConfirmOnce } from '@/hooks/use-confirm-once';
 import { useTheme } from '@/hooks/use-theme';
 
 /** 라운드 한 줄 요약: "철수, 영희" / "협동 승리" (+메모, +점수) */
@@ -80,7 +81,9 @@ export function PlaySheet({ visible, onClose }: { visible: boolean; onClose: () 
   const [toolOpen, setToolOpen] = useState(false);
   // 이 게임 전용 도구(점수표 등). 등록된 게임에서만 버튼이 뜬다.
   const gameTool = useMemo(() => findGameTool(game?.titleKo), [game?.titleKo]);
-  const [confirmCancel, setConfirmCancel] = useState(false);
+  // 시작 취소 확인은 시트 안 다른 곳을 건드리면 풀린다.
+  const cancelConfirm = useConfirmOnce<'cancel'>();
+  const { reset: resetCancelConfirm } = cancelConfirm;
   const elapsed = useElapsedMinutes(play?.startedAt);
   // 판 전체 메모는 스토어 초안 — 시트가 두 곳에 마운트되므로 로컬이면 갈라진다.
   const memo = session.memoDraft;
@@ -94,8 +97,8 @@ export function PlaySheet({ visible, onClose }: { visible: boolean; onClose: () 
     setFirstPlayer(null);
     setDrawOpen(false);
     setToolOpen(false);
-    setConfirmCancel(false);
-  }, [playId]);
+    resetCancelConfirm();
+  }, [playId, resetCancelConfirm]);
 
   if (!play) return null;
 
@@ -157,19 +160,16 @@ export function PlaySheet({ visible, onClose }: { visible: boolean; onClose: () 
     }
   };
 
-  const cancel = async () => {
-    if (!confirmCancel) {
-      setConfirmCancel(true);
-      return;
-    }
-    const ok = await session.cancelPlay();
-    setConfirmCancel(false);
-    if (ok) onClose();
-  };
+  const cancel = () =>
+    cancelConfirm.press('cancel', async () => {
+      if (await session.cancelPlay()) onClose();
+    });
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-      <View style={[styles.root, { backgroundColor: c.background, paddingTop: insets.top }]}>
+      <View
+        {...cancelConfirm.bind}
+        style={[styles.root, { backgroundColor: c.background, paddingTop: insets.top }]}>
         <View style={[styles.header, { borderBottomColor: c.border }]}>
           <View style={styles.headerText}>
             <Text style={[styles.caption, { color: c.accent }]}>
@@ -311,7 +311,7 @@ export function PlaySheet({ visible, onClose }: { visible: boolean; onClose: () 
             accessibilityRole="button"
             style={[styles.footerButton, styles.cancelButton, { borderColor: c.danger }]}>
             <Text style={[styles.buttonText, { color: c.danger }]}>
-              {confirmCancel ? '기록 없이 취소할까요?' : '시작 취소'}
+              {cancelConfirm.pendingId ? '기록 없이 취소할까요?' : '시작 취소'}
             </Text>
           </Pressable>
           <Pressable

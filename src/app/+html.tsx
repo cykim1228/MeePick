@@ -53,6 +53,11 @@ export default function Root({ children }: PropsWithChildren) {
                 overscroll-behavior: none;
               }
               #root { height: 100%; overflow: hidden; }
+              /* 스크롤바를 감춘다 — 스크롤은 그대로 되고 막대만 사라진다.
+                 태블릿·폰에는 원래 없는 요소라, 데스크탑에서만 보이면 목록 폭이
+                 화면마다 달라지고 카드 격자가 어긋난다. 모바일 앱처럼 보이게 하는 데도 방해된다. */
+              * { scrollbar-width: none; -ms-overflow-style: none; }
+              *::-webkit-scrollbar { width: 0; height: 0; display: none; }
               /* 태블릿 가로(≥1024px — use-breakpoint의 expanded와 같은 기준)는 전체를 10% 키운다.
                  11인치를 팔 길이 거리에서 보는 보정. 토큰(Typography 등)이 정적 StyleSheet에
                  박혀 있어 런타임 분기가 안 되므로 웹 셸에서 zoom으로 일괄 확대한다.
@@ -65,6 +70,22 @@ export default function Root({ children }: PropsWithChildren) {
             `,
           }}
         />
+        {/* 오프라인 셸 등록 — public/sw.js.
+            개발 서버에서는 달지 않는다. 워커가 번들을 캐시하면 코드를 고쳐도 옛 화면이
+            뜨는, 원인을 찾기 어려운 상태가 된다. 배포본(정적 내보내기)에서만 켠다. */}
+        {process.env.NODE_ENV === 'production' && (
+          <script
+            dangerouslySetInnerHTML={{
+              __html: `
+                if ('serviceWorker' in navigator) {
+                  window.addEventListener('load', function () {
+                    navigator.serviceWorker.register('/sw.js').catch(function () {});
+                  });
+                }
+              `,
+            }}
+          />
+        )}
       </head>
       <body>{children}</body>
     </html>

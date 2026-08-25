@@ -34,7 +34,9 @@ Android 기기/에뮬레이터는 `npm run android`, 개발 서버만 띄우려�
 | `src/hooks/` | 공용 훅. 파일명은 kebab-case (`use-breakpoint.ts`) |
 | `src/features/games/` | `queries.ts`(조회) / `mappers.ts`(변환) / `recommend.ts`(필터·점수) / `hooks.ts`(화면 연결) |
 | `src/features/plays/` | 플레이 세션 — 멤버·게임중·라운드 기록·통계(`stats.ts`). games와 같은 구조 |
-| `src/app/+html.tsx`, `public/` | 웹 전용 HTML 셸과 PWA 매니페스트·아이콘. 네이티브 빌드와 무관 |
+| `src/features/community/` | 모임 — 회원(프로필·초대)·피드(글·좋아요·댓글)·일정. games와 같은 구조 |
+| `src/app/+html.tsx`, `public/` | 웹 전용 HTML 셸과 PWA 매니페스트·아이콘·서비스 워커(`sw.js`). 네이티브 빌드와 무관 |
+| `deploy/media-server.mjs` | NAS 사진 업로드 서버. 의존성 없는 node 파일 한 장 — 컨테이너에 그대로 얹는다 |
 | `src/lib/` | `supabase.ts`, `database.types.ts` |
 | `supabase/migrations/` | SQL 마이그레이션 (누적. 기존 파일 수정 금지) |
 | `supabase/seed.sql` | **자동 생성** — `node scripts/import-notion.mjs`로 다시 만든다. 직접 수정 금지 |
@@ -65,6 +67,7 @@ Android 기기/에뮬레이터는 `npm run android`, 개발 서버만 띄우려�
 - **반응형 분기는 `useBreakpoint()`로만** 한다. 화면에서 `width > 900` 같은 숫자를 직접 쓰지 않는다.
 - `any` / `@ts-ignore` / 강제 제네릭 캐스팅으로 타입 에러를 덮지 않는다.
 - **조회는 공개, 쓰기는 로그인 뒤다.** 외부 공개(deploy/https.md)와 함께 anon 쓰기를 잠갔다(`20260821090000_auth_write_lock.sql`). 로그인은 **공용 계정 1개**(비밀번호 공유)이고 가입은 대시보드에서 꺼 뒀다 — 열면 anon 키로 누구나 authenticated가 되어 잠금이 무의미해진다. 쓰기 쿼리는 첫 줄에서 `requireAuth()`(src/lib/auth.ts)를 불러 조용한 실패(RLS에 막힌 update/delete는 에러 없이 0행 매칭)를 친절한 메시지로 바꾼다. 새 쓰기 쿼리를 만들면 반드시 같은 가드를 넣는다.
+- **모임 사진은 NAS에, DB는 Supabase에 둔다.** 무료 저장소 1GB는 사진 몇백 장이면 찬다. 업로드는 `/media/upload`(NAS의 `deploy/media-server.mjs`)로 가고, DB에는 `nas/2026/08/<uuid>.webp` 형태의 경로만 들어간다. 접두사가 없는 옛 경로는 Supabase Storage를 계속 가리킨다 — 과거 글을 깨지 않으려는 것이므로 지우지 않는다. 게임 표지(`games.image_path`)는 그대로 Storage에 있다.
 - **`SUPABASE_SECRET_KEY`에 `EXPO_PUBLIC_` 접두사를 붙이지 않는다.** 붙이는 순간 RLS를 우회하는 키가 앱 번들에 들어간다.
 - Expo 57은 이전 버전과 API가 다르다. 코드 작성 전 https://docs.expo.dev/versions/v57.0.0/ 를 확인한다.
 - **커밋 메시지 양식**: 깃이모지 제목(예: `🎨 참여 현황 UI 강화 + 로컬 환경 정비`) + 간단한 `- ` 불릿 본문. `feat:` 같은 접두사는 쓰지 않는다. 쉽고 직관적으로.

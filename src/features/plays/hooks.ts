@@ -42,6 +42,11 @@ type Store = {
   toolDraft: unknown;
   hydrated: boolean;
   skippedGate: boolean;
+  /**
+   * 이 세션이 어느 모임 일정에서 시작됐는지. 일정 없이 그냥 모인 날은 null —
+   * 대부분이 그럴 것이므로 null이 정상이지 결손이 아니다.
+   */
+  meetup: { id: string; title: string } | null;
   error: string | null;
 };
 
@@ -53,6 +58,7 @@ let store: Store = {
   toolDraft: null,
   hydrated: false,
   skippedGate: false,
+  meetup: null,
   error: null,
 };
 const listeners = new Set<() => void>();
@@ -74,10 +80,12 @@ function hydrate(force = false): Promise<void> {
       const [members, activePlay] = await Promise.all([fetchMembers(), fetchActivePlay()]);
 
       let memberIds = store.memberIds;
+      let meetup = store.meetup;
       if (activePlay) {
         // 게임중이면 그 판의 멤버가 오늘의 멤버다.
         memberIds = activePlay.memberIds;
-      } else if (!memberIds.length) {
+      }
+      if (!activePlay && !memberIds.length) {
         try {
           const raw = await AsyncStorage.getItem(STORAGE_KEY);
           if (raw) {
@@ -94,6 +102,14 @@ function hydrate(force = false): Promise<void> {
               memberIds = ((saved as { ids: unknown[] }).ids).filter(
                 (x): x is string => typeof x === 'string' && valid.has(x)
               );
+              const savedMeetup = (saved as { meetup?: unknown }).meetup;
+              if (
+                typeof savedMeetup === 'object' &&
+                savedMeetup !== null &&
+                typeof (savedMeetup as { id?: unknown }).id === 'string'
+              ) {
+                meetup = savedMeetup as { id: string; title: string };
+              }
             }
           }
         } catch {
@@ -101,7 +117,7 @@ function hydrate(force = false): Promise<void> {
         }
       }
 
-      setStore({ members, activePlay, memberIds, hydrated: true, error: null });
+      setStore({ members, activePlay, memberIds, meetup, hydrated: true, error: null });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       const friendly = /does not exist|schema cache/.test(msg)
@@ -115,8 +131,11 @@ function hydrate(force = false): Promise<void> {
   return hydrating;
 }
 
-function persistMemberIds(ids: string[]) {
-  AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ ids, savedOn: localToday() })).catch(() => {
+function persistMemberIds(ids: string[], meetup: Store['meetup'] = store.meetup) {
+  AsyncStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify({ ids, meetup, savedOn: localToday() })
+  ).catch(() => {
     // 유지되지 않을 뿐 동작에는 지장 없다.
   });
 }
@@ -272,6 +291,26 @@ export function useSession() {
 
     skipGate: useCallback(() => setStore({ skippedGate: true }), []),
 
+    /** 이 세션이 시작된 모임 일정. 없으면 null */
+    meetup: s.meetup,
+
+    /**
+     * 일정에서 모임 시작 — 참석자를 그대로 오늘의 멤버로 앉힌다.
+     *
+     * 계정이 없는 손님은 여기서 자동으로 들어오지 못한다(연결된 members 행이 없다).
+     * 멤버 고르는 화면에서 손으로 더하면 되고, 그 편이 "누가 실제로 왔는지"를
+     * 앱이 멋대로 단정하는 것보다 낫다.
+     */
+    startFromMeetup: useCallback(
+      (meetup: { id: string; title: string }, memberIds: string[]) => {
+        if (store.activePlay) return false;
+        setStore({ memberIds, meetup, skippedGate: false });
+        persistMemberIds(memberIds, meetup);
+        return true;
+      },
+      []
+    ),
+
     /**
      * 모임 마무리 — 오늘의 멤버를 비워 게이트로 돌아간다.
      * 저장된 선택도 지워, 새로고침해도 지난 모임 멤버가 되살아나지 않는다.
@@ -279,7 +318,7 @@ export function useSession() {
      */
     endSession: useCallback(() => {
       if (store.activePlay) return false;
-      setStore({ memberIds: [], skippedGate: false, memoDraft: '' });
+      setStore({ memberIds: [], skippedGate: false, memoDraft: '', meetup: null });
       AsyncStorage.removeItem(STORAGE_KEY).catch(() => {
         // 지워지지 않으면 다음 하이드레이션 때 날짜 경계가 걸러준다.
       });
@@ -329,7 +368,7 @@ export function useSession() {
         run(async () => {
           if (store.activePlay) throw new Error('이미 진행 중인 게임이 있습니다. 먼저 종료하세요.');
           if (!store.memberIds.length) throw new Error('오늘의 멤버를 먼저 선택하세요.');
-          const play = await startPlay(gameId, store.memberIds);
+          const play = await startPlay(gameId, store.memberIds, store.meetup?.id ?? null);
           // 이전 판의 점수표 초안이 새 판으로 넘어오면 안 된다
           setStore({ activePlay: play, toolDraft: null });
           return play;
@@ -385,7 +424,7 @@ export function useSession() {
     quickLog: useCallback(
       (gameId: string) =>
         run(async () => {
-          const play = await logPlay(gameId, store.memberIds);
+          const play = await logPlay(gameId, store.memberIds, store.meetup?.id ?? null);
           touchGameLastPlayed(gameId, localToday());
           return play;
         }),

@@ -44,6 +44,10 @@ export type Database = {
         Row: {
           id: string;
           name: string;
+          /** 이 멤버가 앱 계정과 연결돼 있으면 그 회원 id. 손님 멤버는 null */
+          profile_id: string | null;
+          /** 명단에서 숨긴다. 운영 계정처럼 실제로 게임하지 않는 멤버용 */
+          hidden: boolean;
           created_at: string;
         };
         Insert: Partial<Database['public']['Tables']['members']['Row']>;
@@ -60,9 +64,107 @@ export type Database = {
           scores: Json;
           started_at: string;
           ended_at: string | null;
+          /** 이 판이 속한 모임 일정. 일정 없이 그냥 모인 날은 null */
+          meetup_id: string | null;
         };
         Insert: Partial<Database['public']['Tables']['plays']['Row']>;
         Update: Partial<Database['public']['Tables']['plays']['Row']>;
+        Relationships: [];
+      };
+      profiles: {
+        Row: {
+          id: string;
+          handle: string;
+          /** 닉네임 — 화면에 보이는 이름 */
+          display_name: string;
+          /** 실명 — 누구인지 확인용 */
+          real_name: string | null;
+          avatar_path: string | null;
+          bio: string | null;
+          /** 모임장. 남의 글 삭제와 회원 내보내기가 가능하다 */
+          is_admin: boolean;
+          created_at: string;
+        };
+        Insert: Partial<Database['public']['Tables']['profiles']['Row']>;
+        Update: Partial<Database['public']['Tables']['profiles']['Row']>;
+        Relationships: [];
+      };
+      invite_codes: {
+        Row: {
+          code: string;
+          created_by: string | null;
+          used_by: string | null;
+          used_at: string | null;
+          is_reusable: boolean;
+          created_at: string;
+        };
+        Insert: Partial<Database['public']['Tables']['invite_codes']['Row']>;
+        Update: Partial<Database['public']['Tables']['invite_codes']['Row']>;
+        Relationships: [];
+      };
+      posts: {
+        Row: {
+          id: string;
+          author_id: string;
+          body: string;
+          image_paths: string[];
+          game_id: string | null;
+          meetup_id: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: Partial<Database['public']['Tables']['posts']['Row']>;
+        Update: Partial<Database['public']['Tables']['posts']['Row']>;
+        Relationships: [];
+      };
+      post_likes: {
+        Row: { post_id: string; user_id: string; created_at: string };
+        Insert: Partial<Database['public']['Tables']['post_likes']['Row']>;
+        Update: Partial<Database['public']['Tables']['post_likes']['Row']>;
+        Relationships: [];
+      };
+      game_likes: {
+        Row: { game_id: string; profile_id: string; created_at: string };
+        Insert: Partial<Database['public']['Tables']['game_likes']['Row']>;
+        Update: Partial<Database['public']['Tables']['game_likes']['Row']>;
+        Relationships: [];
+      };
+      post_comments: {
+        Row: {
+          id: string;
+          post_id: string;
+          author_id: string;
+          body: string;
+          created_at: string;
+        };
+        Insert: Partial<Database['public']['Tables']['post_comments']['Row']>;
+        Update: Partial<Database['public']['Tables']['post_comments']['Row']>;
+        Relationships: [];
+      };
+      meetups: {
+        Row: {
+          id: string;
+          title: string;
+          starts_at: string;
+          place: string | null;
+          memo: string | null;
+          capacity: number | null;
+          created_by: string;
+          created_at: string;
+        };
+        Insert: Partial<Database['public']['Tables']['meetups']['Row']>;
+        Update: Partial<Database['public']['Tables']['meetups']['Row']>;
+        Relationships: [];
+      };
+      meetup_rsvps: {
+        Row: {
+          meetup_id: string;
+          user_id: string;
+          status: 'going' | 'maybe' | 'no';
+          created_at: string;
+        };
+        Insert: Partial<Database['public']['Tables']['meetup_rsvps']['Row']>;
+        Update: Partial<Database['public']['Tables']['meetup_rsvps']['Row']>;
         Relationships: [];
       };
     };
@@ -77,8 +179,33 @@ export type Database = {
         Returns: Database['public']['Tables']['plays']['Row'];
       };
       log_play: {
-        Args: { p_game_id: string; p_member_ids?: string[]; p_played_on?: string };
+        Args: {
+          p_game_id: string;
+          p_member_ids?: string[];
+          p_played_on?: string;
+          p_meetup_id?: string | null;
+        };
         Returns: Database['public']['Tables']['plays']['Row'];
+      };
+      link_guest_to_profile: {
+        Args: { p_guest_id: string; p_profile_id: string };
+        Returns: Database['public']['Tables']['members']['Row'];
+      };
+      is_member: {
+        Args: Record<string, never>;
+        Returns: boolean;
+      };
+      is_admin: {
+        Args: Record<string, never>;
+        Returns: boolean;
+      };
+      check_invite: {
+        Args: { p_code: string };
+        Returns: boolean;
+      };
+      redeem_invite: {
+        Args: { p_code: string; p_display_name: string; p_real_name?: string | null };
+        Returns: Database['public']['Tables']['profiles']['Row'];
       };
     };
     Enums: Record<string, never>;

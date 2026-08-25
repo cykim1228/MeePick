@@ -12,7 +12,9 @@ export type Breakpoint = 'compact' | 'medium' | 'expanded';
 export function useBreakpoint(): Breakpoint {
   const { width } = useWindowDimensions();
   if (width >= 1024) return 'expanded'; // 태블릿 가로 — 기본 설계 기준
-  if (width >= 768) return 'medium'; // 태블릿 세로, 소형 태블릿
+  // 600은 '폰의 끝'이다. 768은 아이패드 세로 폭이라 태블릿의 시작이지 폰의 경계가 아니고,
+  // 그 값을 쓰면 430~768 구간(폴더블·소형 태블릿)이 통째로 폰 취급을 받아 글자가 과하게 작아진다.
+  if (width >= 600) return 'medium'; // 태블릿 세로, 소형 태블릿
   return 'compact'; // 폰
 }
 

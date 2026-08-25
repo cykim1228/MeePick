@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { FlatList, Modal, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { FlatList, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { CenterModal } from '@/components/center-modal';
@@ -10,7 +10,9 @@ import { GameDetail } from '@/components/game-detail';
 import { GameForm } from '@/components/game-form';
 import { EmptyView, ErrorView, LoadingView } from '@/components/state-views';
 import { Radius, Spacing, TouchTarget, Typography } from '@/constants/theme';
+import { useMyProfile } from '@/features/community/hooks';
 import { useGames } from '@/features/games/hooks';
+import { useGameLikes } from '@/features/games/likes';
 import { countBy, optionCounts } from '@/features/games/recommend';
 import { EMPTY_FILTER, type Game, type GameFilter, type SortKey } from '@/features/games/types';
 import { useGridColumns } from '@/hooks/use-grid-columns';
@@ -24,6 +26,7 @@ const TOP_THEMES = 10;
 
 const SORTS: { key: SortKey; label: string }[] = [
   { key: 'recommended', label: '추천순' },
+  { key: 'mostLiked', label: '하트순' },
   { key: 'mostPlayed', label: '많이 한 순' },
   { key: 'longestUnplayed', label: '오랜만인 순' },
   { key: 'shortest', label: '짧은 순' },
@@ -32,6 +35,12 @@ const SORTS: { key: SortKey; label: string }[] = [
 
 export default function ExploreScreen() {
   const c = useTheme();
+  // 게임 목록은 모임의 공용 자산이라 모임장만 고친다.
+  const me = useMyProfile();
+  const canEditGames = me.profile?.isAdmin ?? false;
+  // 하트는 회원만 누른다. 비회원에게 버튼을 보여 주면 눌러 놓고 RLS에서 막힌다.
+  const isMember = me.isMember;
+  const likes = useGameLikes();
   const insets = useSafeAreaInsets();
 
   const [filter, setFilter] = useState<GameFilter>(EMPTY_FILTER);
@@ -177,7 +186,9 @@ export default function ExploreScreen() {
           {hasFilters && (
             <Chip label="초기화" onPress={() => setFilter((f) => ({ ...EMPTY_FILTER, sort: f.sort }))} />
           )}
-          <Chip label="＋ 게임 추가" onPress={() => setEditing({ game: null })} />
+          {canEditGames && (
+            <Chip label="＋ 게임 추가" onPress={() => setEditing({ game: null })} />
+          )}
         </View>
       </View>
     </View>
@@ -206,7 +217,10 @@ export default function ExploreScreen() {
             game={item}
             playerCount={filter.playerCount}
             selected={item.id === selectedId}
+            liked={likes.mine(item.id)}
+            likeCount={likes.count(item.id)}
             onPress={() => setSelectedId(item.id)}
+            onToggleLike={isMember ? () => void likes.toggle(item.id) : undefined}
           />
         </View>
       )}
@@ -244,7 +258,7 @@ export default function ExploreScreen() {
             game={selected}
             playerCount={filter.playerCount}
             onClose={() => setSelectedId(null)}
-            onEdit={() => setEditing({ game: selected })}
+            onEdit={canEditGames ? () => setEditing({ game: selected }) : undefined}
           />
         )}
       </CenterModal>

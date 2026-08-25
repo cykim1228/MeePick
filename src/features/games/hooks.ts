@@ -6,7 +6,8 @@ import { fetchPlayCounts } from '@/features/plays/queries';
 
 import type { GameInput } from './mappers';
 import { createGame, deleteGame, fetchOwnedGames, fetchWishlistGames, updateGame } from './queries';
-import { applyFilter } from './recommend';
+import { loadGameLikes, useGameLikeStore } from './likes';
+import { applyFilter, type LikeContext } from './recommend';
 import type { Game, GameFilter } from './types';
 
 /**
@@ -83,16 +84,36 @@ export function touchGameLastPlayed(gameId: string, playedOn: string) {
   });
 }
 
-/** 소장 게임 전체. 필터를 넘기면 필터·정렬까지 적용된 결과를 돌려준다. */
-export function useGames(filter?: GameFilter) {
+/**
+ * 소장 게임 전체. 필터를 넘기면 필터·정렬까지 적용된 결과를 돌려준다.
+ *
+ * audience는 '오늘 온 사람들'의 profile id다. 넘기면 그 사람들이 하트를 누른 게임이
+ * 추천에서 위로 올라온다. 안 넘기면 하트는 '하트순' 정렬에만 쓰인다.
+ */
+export function useGames(filter?: GameFilter, audience?: string[]) {
   const { games, error, loading } = useStore();
+  // 하트는 '인기순' 정렬의 재료이면서 카드에 그릴 값이기도 하다. 두 화면이 따로 받지 않도록
+  // 목록을 주는 이 훅에서 함께 챙긴다.
+  const likes = useGameLikeStore();
 
   useEffect(() => {
     void load();
+    void loadGameLikes();
   }, []);
 
   const all = useMemo(() => games ?? [], [games]);
-  const filtered = useMemo(() => (filter ? applyFilter(all, filter) : all), [all, filter]);
+
+  // 배열은 렌더마다 새 신원이라 그대로 의존성에 넣으면 매번 다시 계산된다. 내용으로 비교한다.
+  const audienceKey = audience?.join(',') ?? '';
+  const likeContext = useMemo<LikeContext>(
+    () => ({ byGame: likes.byGame, audience: new Set(audienceKey ? audienceKey.split(',') : []) }),
+    [likes.byGame, audienceKey]
+  );
+
+  const filtered = useMemo(
+    () => (filter ? applyFilter(all, filter, undefined, likeContext) : all),
+    [all, filter, likeContext]
+  );
 
   return {
     all,

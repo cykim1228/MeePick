@@ -2,6 +2,8 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { Radius, Spacing, TouchTarget, Typography } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { useBreakpoint } from '@/hooks/use-breakpoint';
+import { useType } from '@/hooks/use-type';
 
 type Props = {
   label: string;
@@ -14,6 +16,11 @@ type Props = {
 
 export function Chip({ label, selected = false, count, disabled = false, onPress }: Props) {
   const c = useTheme();
+  // 칩은 앱 전체에서 가장 많이 쓰이는 요소라, 여기 크기가 화면 밀도를 좌우한다.
+  const t = useType();
+  // 폰에서는 알약 자체도 함께 줄인다 — 글자만 줄이면 여백만 커진 이상한 비율이 된다.
+  // 태블릿·데스크탑은 여럿이 팔 길이에서 함께 보므로 큰 크기를 유지한다.
+  const phone = useBreakpoint() === 'compact';
   const dimmed = disabled || count === 0;
 
   return (
@@ -26,16 +33,24 @@ export function Chip({ label, selected = false, count, disabled = false, onPress
       accessibilityState={{ selected, disabled: dimmed }}
       style={({ pressed }) => [
         styles.chip,
+        phone && styles.chipCompact,
         {
           backgroundColor: selected ? c.accent : c.backgroundElement,
           borderColor: selected ? c.accent : c.border,
           opacity: dimmed ? 0.4 : pressed ? 0.75 : 1,
         },
       ]}>
-      <Text style={[styles.label, { color: selected ? c.onAccent : c.text }]}>{label}</Text>
+      <Text style={[styles.label, t.body, { fontWeight: '600', color: selected ? c.onAccent : c.text }]}>
+        {label}
+      </Text>
       {count !== undefined && (
-        <View style={[styles.count, { backgroundColor: selected ? c.onAccent : c.background }]}>
-          <Text style={[styles.countText, { color: selected ? c.accent : c.textSecondary }]}>
+        <View
+          style={[
+            styles.count,
+            phone && styles.countCompact,
+            { backgroundColor: selected ? c.onAccent : c.background },
+          ]}>
+          <Text style={[styles.countText, t.caption, { color: selected ? c.accent : c.textSecondary }]}>
             {count}
           </Text>
         </View>
@@ -45,6 +60,8 @@ export function Chip({ label, selected = false, count, disabled = false, onPress
 }
 
 const styles = StyleSheet.create({
+  chipCompact: { minHeight: 38, paddingHorizontal: Spacing.two, gap: Spacing.one },
+  countCompact: { minWidth: 20, paddingHorizontal: 3 },
   chip: {
     minHeight: TouchTarget.primary,
     flexDirection: 'row',
