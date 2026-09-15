@@ -19,6 +19,8 @@ export type GameInput = Pick<
   | 'weight'
   | 'categories'
   | 'themes'
+  | 'mechanics'
+  | 'imagePath'
   | 'notes'
   | 'ruleVideoUrl'
 >;
@@ -43,6 +45,8 @@ export function toGameRow(input: GameInput): Partial<GameRow> {
     weight: input.weight,
     categories: input.categories,
     themes: input.themes,
+    mechanics: input.mechanics,
+    image_path: input.imagePath,
     notes: input.notes?.trim() || null,
     rule_video_url: input.ruleVideoUrl?.trim() || null,
     is_estimated: false,

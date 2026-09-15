@@ -8,6 +8,7 @@ import { CollapsibleFilterSection } from '@/components/filter-section';
 import { GameCard } from '@/components/game-card';
 import { GameDetail } from '@/components/game-detail';
 import { GameForm } from '@/components/game-form';
+import { ScreenTitle } from '@/components/screen-title';
 import { EmptyView, ErrorView, LoadingView } from '@/components/state-views';
 import { Radius, Spacing, TouchTarget, Typography } from '@/constants/theme';
 import { useMyProfile } from '@/features/community/hooks';
@@ -16,6 +17,7 @@ import { useGameLikes } from '@/features/games/likes';
 import { countBy, optionCounts } from '@/features/games/recommend';
 import { EMPTY_FILTER, type Game, type GameFilter, type SortKey } from '@/features/games/types';
 import { useGridColumns } from '@/hooks/use-grid-columns';
+import { gridKey, useGridRows } from '@/hooks/use-grid-rows';
 import { useTheme } from '@/hooks/use-theme';
 
 /**
@@ -46,6 +48,7 @@ export default function ExploreScreen() {
   const [filter, setFilter] = useState<GameFilter>(EMPTY_FILTER);
   const [showAllThemes, setShowAllThemes] = useState(false);
   const [showAllMechanics, setShowAllMechanics] = useState(false);
+  const [categorySectionOpen, setCategorySectionOpen] = useState(false);
   const [themeSectionOpen, setThemeSectionOpen] = useState(false);
   const [mechanicsSectionOpen, setMechanicsSectionOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -53,12 +56,11 @@ export default function ExploreScreen() {
   const [editing, setEditing] = useState<{ game: Game | null } | null>(null);
 
   // 훑어보는 화면이라 추천 화면보다 카드를 조금 작게 잡아 한 눈에 더 많이 들어오게 한다.
-  const { columns, width, onLayout } = useGridColumns(200);
-  const cardWidth = Math.floor(
-    (width - Spacing.four * 2 - Spacing.three * (columns - 1)) / columns
-  );
+  const { columns, onLayout } = useGridColumns(200);
 
   const { all, games, loading, error, reload } = useGames(filter);
+  // 마지막 줄을 빈 칸으로 메워, 남은 카드가 줄 전체로 늘어나지 않게 한다.
+  const cells = useGridRows(games, columns);
   const selected = useMemo(() => all.find((g) => g.id === selectedId) ?? null, [all, selectedId]);
 
   const categories = useMemo(() => countBy(all, 'categories').map(([v]) => v), [all]);
@@ -94,6 +96,8 @@ export default function ExploreScreen() {
 
   const header = (
     <View style={styles.controls}>
+      <ScreenTitle title="게임 목록" subtitle={`${games.length} / ${all.length}개`} />
+
       <TextInput
         value={filter.query}
         onChangeText={(query) => setFilter((f) => ({ ...f, query }))}
@@ -105,18 +109,25 @@ export default function ExploreScreen() {
         ]}
       />
 
-      <Text style={[styles.groupLabel, { color: c.textSecondary }]}>카테고리</Text>
-      <View style={styles.chipRow}>
-        {categories.map((v) => (
-          <Chip
-            key={v}
-            label={v}
-            selected={filter.categories.includes(v)}
-            count={categoryCounts[v]}
-            onPress={() => toggle('categories', v)}
-          />
-        ))}
-      </View>
+      {/* 테마·메커니즘과 같은 규칙으로 접는다 — 축마다 규칙이 다르면 어디를 눌러야 하는지
+          매번 다시 배워야 한다. */}
+      <CollapsibleFilterSection
+        label="카테고리"
+        selectedCount={filter.categories.length}
+        expanded={categorySectionOpen}
+        onToggle={() => setCategorySectionOpen((v) => !v)}>
+        <View style={styles.chipRow}>
+          {categories.map((v) => (
+            <Chip
+              key={v}
+              label={v}
+              selected={filter.categories.includes(v)}
+              count={categoryCounts[v]}
+              onPress={() => toggle('categories', v)}
+            />
+          ))}
+        </View>
+      </CollapsibleFilterSection>
 
       <CollapsibleFilterSection
         label="테마"
@@ -206,22 +217,24 @@ export default function ExploreScreen() {
     <FlatList
       key={`grid-${columns}`}
       numColumns={columns}
-      data={games}
-      keyExtractor={(g) => g.id}
+      data={cells}
+      keyExtractor={gridKey}
       ListHeaderComponent={header}
       columnWrapperStyle={columns > 1 ? styles.column : undefined}
       contentContainerStyle={[styles.listContent, { paddingBottom: insets.bottom + Spacing.six }]}
       renderItem={({ item }) => (
-        <View style={{ width: cardWidth }}>
-          <GameCard
-            game={item}
-            playerCount={filter.playerCount}
-            selected={item.id === selectedId}
-            liked={likes.mine(item.id)}
-            likeCount={likes.count(item.id)}
-            onPress={() => setSelectedId(item.id)}
-            onToggleLike={isMember ? () => void likes.toggle(item.id) : undefined}
-          />
+        <View style={styles.cell}>
+          {item && (
+            <GameCard
+              game={item}
+              playerCount={filter.playerCount}
+              selected={item.id === selectedId}
+              liked={likes.mine(item.id)}
+              likeCount={likes.count(item.id)}
+              onPress={() => setSelectedId(item.id)}
+              onToggleLike={isMember ? () => void likes.toggle(item.id) : undefined}
+            />
+          )}
         </View>
       )}
       ListEmptyComponent={
@@ -241,6 +254,8 @@ export default function ExploreScreen() {
       visible
       game={editing.game}
       categoryOptions={categories}
+      themeOptions={themes}
+      mechanicOptions={mechanics}
       onClose={() => setEditing(null)}
       onSaved={(g) => setSelectedId(g.id)}
       onDeleted={() => setSelectedId(null)}
@@ -271,6 +286,8 @@ const styles = StyleSheet.create({
   screen: { flex: 1 },
   listContent: { padding: Spacing.four, gap: Spacing.three },
   column: { gap: Spacing.three },
+  // 칸을 flex로 두면 줄이 언제나 정확히 채워진다 — 폭을 몇 픽셀 잘못 재도 여백이 남지 않는다.
+  cell: { flex: 1 },
   controls: { gap: Spacing.two, paddingBottom: Spacing.four },
   search: {
     minHeight: TouchTarget.primary,

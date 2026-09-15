@@ -5,6 +5,7 @@ import { useColorScheme } from 'react-native';
 
 import { AnimatedSplashOverlay } from '@/components/animated-icon';
 import AppTabs from '@/components/app-tabs';
+import { Onboarding } from '@/components/onboarding';
 
 SplashScreen.preventAutoHideAsync();
 
@@ -19,6 +20,8 @@ export default function TabLayout() {
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
       <AnimatedSplashOverlay />
       <AppTabs />
+      {/* 첫 안내는 어느 탭에 있든 떠야 한다 — 가입 직후 어느 화면에 떨어질지는 그때그때 다르다. */}
+      <Onboarding />
     </ThemeProvider>
   );
 }

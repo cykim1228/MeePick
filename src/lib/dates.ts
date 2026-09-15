@@ -45,13 +45,53 @@ export function dDay(value: string, now = new Date()): string {
   return '지난 모임';
 }
 
+const WEEK = ['일', '월', '화', '수', '목', '금', '토'];
+
 /** 일정용 — '8월 30일 (토) 오후 7:00' */
 export function formatMeetupTime(value: string): string {
   const d = new Date(value);
-  const week = ['일', '월', '화', '수', '목', '금', '토'][d.getDay()];
+  return `${d.getMonth() + 1}월 ${d.getDate()}일 (${WEEK[d.getDay()]}) ${formatClock(value)}`;
+}
+
+/** 시각만 — '오후 7:00'. 달력에서 날짜를 이미 고른 뒤에 쓴다. */
+export function formatClock(value: string): string {
+  const d = new Date(value);
   const h = d.getHours();
   const ampm = h < 12 ? '오전' : '오후';
   const h12 = h % 12 === 0 ? 12 : h % 12;
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  return `${d.getMonth() + 1}월 ${d.getDate()}일 (${week}) ${ampm} ${h12}:${mm}`;
+  return `${ampm} ${h12}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+/** 'YYYY-MM-DD' → '9월 20일 (토)' */
+export function formatDayLabel(date: string): string {
+  const [y, m, d] = date.split('-').map(Number);
+  return `${m}월 ${d}일 (${WEEK[new Date(y, m - 1, d).getDay()]})`;
+}
+
+/** 'YYYY-MM-DD' → 'YYYY-MM' */
+export function monthOf(date: string): string {
+  return date.slice(0, 7);
+}
+
+/** 달 옮기기 — ('2026-12', 1) → '2027-01' */
+export function shiftMonth(month: string, delta: number): string {
+  const [y, m] = month.split('-').map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+/**
+ * 달력 칸 — 일요일에 시작하는 주 단위 날짜들.
+ * 그 달의 마지막 날이 든 주까지만 만든다(5주 또는 6주). 늘 6주로 그리면 빈 줄이 한 줄 남는 달이 생긴다.
+ */
+export function monthWeeks(month: string): string[][] {
+  const [y, m] = month.split('-').map(Number);
+  const lead = new Date(y, m - 1, 1).getDay();
+  const days = new Date(y, m, 0).getDate();
+  const weeks: string[][] = [];
+  for (let i = 0; i < Math.ceil((lead + days) / 7) * 7; i += 1) {
+    if (i % 7 === 0) weeks.push([]);
+    weeks[weeks.length - 1].push(localDateOf(new Date(y, m - 1, 1 - lead + i)));
+  }
+  return weeks;
 }

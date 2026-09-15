@@ -71,7 +71,9 @@ export function DateTimeField({
         accessibilityRole="button"
         accessibilityLabel={`${label} 고르기`}
         style={[styles.field, { backgroundColor: c.backgroundElement, borderColor: c.border }]}>
-        <Icon name={mode === 'date' ? 'calendar' : 'more'} size={18} color={c.textSecondary} />
+        {/* 시간에는 아이콘을 붙이지 않는다 — 시계 아이콘이 없어 '⋯'를 대신 썼는데,
+            뜻도 없으면서 좁은 폰에서 "오후 7:00"을 잘리게 만든다. 값이 이미 시간임을 말한다. */}
+        {mode === 'date' && <Icon name="calendar" size={18} color={c.textSecondary} />}
         <Text style={[t.body, { color: c.text, flex: 1 }]} numberOfLines={1}>
           {mode === 'date' ? labelOfDate(value) : labelOfTime(value)}
         </Text>

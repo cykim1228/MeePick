@@ -6,6 +6,9 @@ import { Platform, useWindowDimensions, type LayoutChangeEvent } from 'react-nat
  * 그러면 onLayout·창 너비는 시각 픽셀로 오는데 스타일의 width는 논리 픽셀로 적용되어,
  * 시각 픽셀 그대로 카드 폭을 계산하면 행이 zoom 배율만큼 오른쪽으로 삐져나간다.
  * 그래서 측정값을 zoom으로 나눠 논리 픽셀로 되돌린다.
+ *
+ * **Modal 안에서는 쓰지 말 것** — RN Web의 Modal은 #root 바깥에 그려져 zoom이 걸리지 않는다.
+ * 거기서 이 보정을 하면 실제보다 좁게 잡아 오른쪽이 빈다(components/onboarding.tsx 참고).
  */
 function layoutZoom(): number {
   if (Platform.OS !== 'web' || typeof document === 'undefined') return 1;
@@ -35,18 +38,34 @@ const GUTTER = 24 * 2 + 16;
 
 export function useGridColumns(targetCardWidth = 240, reservedWidth = 0) {
   const { width: windowWidth } = useWindowDimensions();
-  const [measured, setMeasured] = useState(0);
+  /**
+   * 측정값은 **언제 잰 것인지**와 함께 들고 있는다.
+   *
+   * 창 크기가 바뀌면(태블릿 회전이 대표적) 컨테이너는 곧바로 넓어지는데, 그때 onLayout이
+   * 항상 다시 오지는 않는다. 폭만 저장해 두면 옛 값에 붙들려 열 수가 그대로 남고,
+   * 넓어진 화면 오른쪽이 통째로 비어 버린다. 잰 시점의 창 너비를 같이 적어 두면
+   * "이 측정은 지금 창에 대한 것이 아니다"를 알아볼 수 있다.
+   */
+  const [measured, setMeasured] = useState<{ width: number; forWindow: number } | null>(null);
 
-  const onLayout = useCallback((e: LayoutChangeEvent) => {
-    const next = e.nativeEvent.layout.width / layoutZoom();
-    // 소수점 흔들림으로 리스트가 재생성되지 않도록 정수로 고정한다.
-    setMeasured((prev) => (Math.abs(prev - next) < 1 ? prev : Math.round(next)));
-  }, []);
+  const onLayout = useCallback(
+    (e: LayoutChangeEvent) => {
+      // 소수점 흔들림으로 리스트가 재생성되지 않도록 정수로 고정한다.
+      const next = Math.round(e.nativeEvent.layout.width / layoutZoom());
+      setMeasured((prev) =>
+        prev && prev.forWindow === windowWidth && Math.abs(prev.width - next) < 1
+          ? prev
+          : { width: next, forWindow: windowWidth }
+      );
+    },
+    [windowWidth]
+  );
 
+  // 지금 창에 대한 측정만 믿는다. 낡았으면 창 너비로 대신하고, 새 측정이 오면 그때 정밀해진다.
+  const fresh = measured?.forWindow === windowWidth ? measured.width : 0;
   // 대체값에서도 상세 패널이 차지하는 폭을 빼준다. 측정이 오지 않는 환경에서
   // 패널을 열면 목록이 좁아지는데 컬럼 수는 그대로여서 카드가 눌리기 때문이다.
-  const width =
-    measured || Math.max(targetCardWidth, windowWidth / layoutZoom() - reservedWidth);
+  const width = fresh || Math.max(targetCardWidth, windowWidth / layoutZoom() - reservedWidth);
 
   let columns = Math.max(1, Math.floor(width / targetCardWidth));
   // 목표 폭에 못 미쳐도 카드가 최소 폭을 지킬 수 있으면 2열로 올린다.

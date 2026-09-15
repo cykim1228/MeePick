@@ -1,27 +1,24 @@
+import { usePathname } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
-import { FlatList, StyleSheet, Text, View } from 'react-native';
+import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { Chip } from '@/components/chip';
+import { Fab } from '@/components/fab';
+import { Icon } from '@/components/icon';
 import { MemberGate } from '@/components/member-gate';
 import { PostCard } from '@/components/post-card';
 import { PostComposer } from '@/components/post-composer';
 import { SearchBar } from '@/components/search-bar';
+import { SheetModal } from '@/components/sheet-modal';
 import { EmptyView, ErrorView, LoadingView } from '@/components/state-views';
-import { Spacing, Typography } from '@/constants/theme';
-import { markSeen, refreshActivity } from '@/features/community/activity';
+import { Radius, Spacing, TouchTarget, Typography } from '@/constants/theme';
+import { refreshActivity, useMarkSeen } from '@/features/community/activity';
+import { usePostDraft, type PostDraft } from '@/features/community/draft';
 import { useFeed, useMyProfile } from '@/features/community/hooks';
+import { openNotifications } from '@/features/community/navigation';
+import { useInbox } from '@/features/community/notifications';
 import { useBreakpoint } from '@/hooks/use-breakpoint';
 import { useTheme } from '@/hooks/use-theme';
-
-/** 피드를 좁히는 축. 사람들이 실제로 찾는 건 이 셋이다 — 전부, 사진, 내가 쓴 것. */
-type FeedScope = 'all' | 'photo' | 'mine';
-
-const SCOPES: { key: FeedScope; label: string }[] = [
-  { key: 'all', label: '전체' },
-  { key: 'photo', label: '사진' },
-  { key: 'mine', label: '내 글' },
-];
 
 /**
  * 모임 피드 — 인스타그램식 세로 카드 목록.
@@ -37,15 +34,26 @@ export default function FeedScreen() {
   const phone = useBreakpoint() === 'compact';
 
   const [query, setQuery] = useState('');
-  const [scope, setScope] = useState<FeedScope>('all');
+  const [writing, setWriting] = useState(false);
+  const inbox = useInbox(isMember);
 
   /**
-   * 이 화면을 열면 '봤다'고 적는다. 목록이 도착한 뒤에 적어야 —
-   * 화면을 여는 사이 올라온 글까지 읽은 것으로 넘어가지 않는다.
+   * 다른 화면(모임 마무리, 모임 페이지의 '후기 남기기')이 초안을 보내면 글쓰기 창을 연다.
+   * 창은 열려야 초안을 받는다 — 안 열어 주면 초안은 전달함에 머문 채, 사람은 빈 피드만 보게 된다.
    */
+  const draft = usePostDraft();
+  const [seenDraft, setSeenDraft] = useState<PostDraft | null>(null);
+  if (draft && draft !== seenDraft) {
+    setSeenDraft(draft);
+    setWriting(true);
+  }
+
+  // 이 화면을 보고 있는 동안은 '봤다'로 유지한다 — 탭 화면은 옮겨 다녀도 마운트된 채 남아서,
+  // 뜰 때 한 번만 적으면 다시 돌아왔을 때 점이 안 꺼진다.
+  useMarkSeen('feed', usePathname() === '/feed');
   useEffect(() => {
-    void refreshActivity().then(() => markSeen('feed'));
-  }, [feed.posts.length]);
+    void refreshActivity();
+  }, []);
 
   /**
    * 검색은 클라이언트에서 한다. 글이 수천 개가 되기 전까지는 이미 받아 둔 목록을
@@ -56,17 +64,15 @@ export default function FeedScreen() {
    */
   const posts = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return feed.posts.filter((p) => {
-      if (scope === 'mine' && p.author.id !== profile?.id) return false;
-      if (scope === 'photo' && p.imagePaths.length === 0) return false;
-      if (!needle) return true;
-      return [p.body, p.author.displayName, p.gameTitle, p.meetupTitle]
+    if (!needle) return feed.posts;
+    return feed.posts.filter((p) =>
+      [p.body, p.author.displayName, p.gameTitle, p.meetupTitle]
         .filter(Boolean)
-        .some((v) => (v as string).toLowerCase().includes(needle));
-    });
-  }, [feed.posts, query, scope, profile?.id]);
+        .some((v) => (v as string).toLowerCase().includes(needle))
+    );
+  }, [feed.posts, query]);
 
-  const filtering = query.trim().length > 0 || scope !== 'all';
+  const filtering = query.trim().length > 0;
 
   if (profileLoading) {
     return (
@@ -84,7 +90,9 @@ export default function FeedScreen() {
     );
   }
 
-  if (feed.error) {
+  // 목록을 아예 못 받았을 때만 화면을 오류로 바꾼다. 좋아요 실패 같은 작은 오류로
+  // 이미 보이던 글이 통째로 사라지면 안 된다 — 그런 오류는 검색창 아래 한 줄로 남긴다.
+  if (feed.error && !feed.posts.length) {
     return (
       <View style={[styles.screen, { backgroundColor: c.background, paddingTop: insets.top }]}>
         <ErrorView message={feed.error} onRetry={() => void feed.reload()} />
@@ -96,6 +104,33 @@ export default function FeedScreen() {
   // 32px 제목이 첫 화면의 3분의 1을 먹으면 정작 글이 안 보인다.
   return (
     <View style={[styles.screen, { backgroundColor: c.background, paddingTop: insets.top }]}>
+      {/* 검색은 목록 밖에 둔다 — 머리말에 넣으면 스크롤을 조금만 내려도 사라져서,
+          찾으려면 맨 위까지 되돌아가야 한다. */}
+      <View style={[styles.bar, { borderBottomColor: c.border }]}>
+        <View style={styles.barRow}>
+          <View style={styles.search}>
+            <SearchBar
+              value={query}
+              onChange={setQuery}
+              placeholder="글 · 사람 · 게임 이름으로 찾기"
+              hint={filtering ? `${posts.length}개` : undefined}
+            />
+          </View>
+          {/* 알림함 — 내 글에 달린 댓글·좋아요, 새 일정. 모임 소식을 보러 오는 곳이 피드라 여기 둔다. */}
+          <Pressable
+            onPress={openNotifications}
+            accessibilityRole="button"
+            accessibilityLabel={inbox.hasUnread ? '알림, 새 알림 있음' : '알림'}
+            style={({ pressed }) => [styles.bell, pressed && styles.pressed]}>
+            <Icon name="bell" size={22} color={c.text} />
+            {inbox.hasUnread && (
+              <View style={[styles.bellDot, { backgroundColor: c.accent, borderColor: c.background }]} />
+            )}
+          </Pressable>
+        </View>
+        {feed.error && <Text style={[styles.error, { color: c.danger }]}>{feed.error}</Text>}
+      </View>
+
       <FlatList
         data={posts}
         keyExtractor={(p) => p.id}
@@ -105,33 +140,6 @@ export default function FeedScreen() {
           { paddingBottom: insets.bottom + Spacing.six },
         ]}
         showsVerticalScrollIndicator={false}
-        ListHeaderComponent={
-          <View style={[styles.header, phone && styles.headerPhone]}>
-            <PostComposer
-              me={profile}
-              pending={feed.pending}
-              onSubmit={(input) => feed.write(input)}
-            />
-            <SearchBar
-              value={query}
-              onChange={setQuery}
-              placeholder="글·사람·게임 이름으로 찾기"
-            />
-            <View style={styles.scopeRow}>
-              {SCOPES.map((s) => (
-                <Chip
-                  key={s.key}
-                  label={s.label}
-                  selected={scope === s.key}
-                  onPress={() => setScope(s.key)}
-                />
-              ))}
-              {filtering && (
-                <Text style={[styles.count, { color: c.textSecondary }]}>{posts.length}개</Text>
-              )}
-            </View>
-          </View>
-        }
         renderItem={({ item }) => (
           <PostCard
             post={item}
@@ -149,11 +157,24 @@ export default function FeedScreen() {
           ) : (
             <EmptyView
               title="아직 글이 없어요"
-              hint="위에서 첫 글을 남겨보세요. 사진도 함께 올릴 수 있습니다."
+              hint="오른쪽 아래 ＋ 로 첫 글을 남겨보세요. 사진도 함께 올릴 수 있습니다."
             />
           )
         }
       />
+
+      <Fab icon="plus" label="글쓰기" accessibilityLabel="글 쓰기" onPress={() => setWriting(true)} />
+
+      <SheetModal visible={writing} onClose={() => setWriting(false)}>
+        <PostComposer
+          pending={feed.pending}
+          onSubmit={async (input) => {
+            const ok = await feed.write(input);
+            if (ok) setWriting(false);
+            return ok;
+          }}
+        />
+      </SheetModal>
     </View>
   );
 }
@@ -171,8 +192,31 @@ const styles = StyleSheet.create({
   },
   // 폰: 카드가 화면 폭을 꽉 쓰고 카드끼리는 선으로 나뉜다(인스타그램식).
   listPhone: { paddingHorizontal: 0, paddingTop: 0, gap: 0 },
-  header: { gap: Spacing.three },
-  scopeRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: Spacing.two },
-  count: { ...Typography.caption },
-  headerPhone: { paddingHorizontal: Spacing.three, paddingTop: Spacing.three, paddingBottom: Spacing.three },
+  error: { ...Typography.caption, paddingTop: Spacing.one },
+  barRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.one },
+  search: { flex: 1, minWidth: 0 },
+  bell: {
+    minWidth: TouchTarget.min,
+    minHeight: TouchTarget.min,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  bellDot: {
+    position: 'absolute',
+    top: 9,
+    right: 10,
+    width: 10,
+    height: 10,
+    borderRadius: Radius.full,
+    borderWidth: 2,
+  },
+  pressed: { opacity: 0.6 },
+  bar: {
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    maxWidth: 560,
+    width: '100%',
+    alignSelf: 'center',
+  },
 });

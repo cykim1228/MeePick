@@ -3,8 +3,10 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Chip } from '@/components/chip';
+import { ScreenTitle } from '@/components/screen-title';
 import { EmptyView, ErrorView, LoadingView } from '@/components/state-views';
 import { Radius, Spacing, Typography } from '@/constants/theme';
+import { useOpenMember } from '@/features/community/navigation';
 import { usePlayHistory, useSession } from '@/features/plays/hooks';
 import {
   computeBestScores,
@@ -12,9 +14,10 @@ import {
   computeStandings,
   computeStreaks,
   computeTopGames,
+  type TopGame,
 } from '@/features/plays/stats';
+import type { Member } from '@/features/plays/types';
 import { useTheme } from '@/hooks/use-theme';
-import { useType } from '@/hooks/use-type';
 import { localDateOf } from '@/lib/dates';
 
 const MEDALS = ['🥇', '🥈', '🥉'];
@@ -33,11 +36,12 @@ const SEGMENTS: { key: Segment; label: string }[] = [
  */
 export default function HallOfFameScreen() {
   const c = useTheme();
-  const t = useType();
   const insets = useSafeAreaInsets();
   const { members } = useSession();
   const { plays, loading, error, reload } = usePlayHistory();
   const [segment, setSegment] = useState<Segment>('wins');
+  // 순위의 사람을 누르면 그 사람 프로필로 간다. 손님은 전적만 있는 프로필로.
+  const openMember = useOpenMember();
 
   const standings = useMemo(() => computeStandings(plays, members), [plays, members]);
   const streaks = useMemo(() => computeStreaks(plays, members), [plays, members]);
@@ -82,7 +86,7 @@ export default function HallOfFameScreen() {
     <View style={[styles.screen, { backgroundColor: c.background, paddingTop: insets.top }]}>
       <ScrollView
         contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + Spacing.six }]}>
-        <Text style={[styles.h1, t.display, { color: c.text }]}>명예의 전당</Text>
+        <ScreenTitle title="명예의 전당" subtitle={`지금까지 ${plays.length}판`} />
 
         <View style={styles.chipRow}>
           {SEGMENTS.map((s) => (
@@ -103,15 +107,19 @@ export default function HallOfFameScreen() {
               standings.map((item, index) => {
                 const top3 = index < 3 && item.roundWins > 0;
                 return (
-                  <View
+                  <Pressable
                     key={item.member.id}
-                    style={[
+                    onPress={() => openMember(item.member)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${item.member.name} 프로필`}
+                    style={({ pressed }) => [
                       styles.row,
                       top3 ? styles.rowTop : null,
                       {
                         backgroundColor: c.backgroundElement,
                         borderColor: index === 0 && item.roundWins > 0 ? c.accent : c.border,
                       },
+                      pressed && styles.pressed,
                     ]}>
                     <Text style={[top3 ? styles.medal : styles.rank, { color: c.textSecondary }]}>
                       {top3 ? MEDALS[index] : `${index + 1}`}
@@ -139,7 +147,7 @@ export default function HallOfFameScreen() {
                     <Text style={[top3 ? styles.winsTop : styles.wins, { color: top3 ? c.accent : c.text }]}>
                       {item.roundWins}승
                     </Text>
-                  </View>
+                  </Pressable>
                 );
               })}
           </>
@@ -158,11 +166,15 @@ export default function HallOfFameScreen() {
               />
             )}
             {bestScores.map((item, index) => (
-              <View
+              <Pressable
                 key={item.member.id}
-                style={[
+                onPress={() => openMember(item.member)}
+                accessibilityRole="button"
+                accessibilityLabel={`${item.member.name} 프로필`}
+                style={({ pressed }) => [
                   styles.row,
                   { backgroundColor: c.backgroundElement, borderColor: index === 0 ? c.accent : c.border },
+                  pressed && styles.pressed,
                 ]}>
                 <Text style={[styles.rank, { color: c.textSecondary }]}>{index + 1}</Text>
                 <View style={styles.rowBody}>
@@ -176,7 +188,7 @@ export default function HallOfFameScreen() {
                 <Text style={[styles.wins, { color: index === 0 ? c.accent : c.text }]}>
                   {item.score}점
                 </Text>
-              </View>
+              </Pressable>
             ))}
           </>
         )}
@@ -227,9 +239,19 @@ export default function HallOfFameScreen() {
                         ]}>
                         {monthStandings.length > 0 ? (
                           <Text style={[styles.body, { color: c.text }]}>
-                            {monthStandings
-                              .map((s, i) => `${i === 0 ? '🏆 ' : ''}${s.member.name} ${s.roundWins}승`)
-                              .join(' · ')}
+                            {monthStandings.map((s, i) => (
+                              <Text key={s.member.id}>
+                                {i > 0 ? ' · ' : ''}
+                                {i === 0 ? '🏆 ' : ''}
+                                <Text
+                                  onPress={() => openMember(s.member)}
+                                  accessibilityRole="link"
+                                  style={styles.nameLink}>
+                                  {s.member.name}
+                                </Text>
+                                {` ${s.roundWins}승`}
+                              </Text>
+                            ))}
                           </Text>
                         ) : (
                           <Text style={[styles.caption, { color: c.textSecondary }]}>
@@ -238,7 +260,13 @@ export default function HallOfFameScreen() {
                         )}
                         {monthGames.map((g) => (
                           <Text key={g.title} style={[styles.caption, { color: c.textSecondary }]} numberOfLines={1}>
-                            {g.title} {g.count}판{g.topWinner ? ` · 최다 우승 ${g.topWinner}` : ''}
+                            {g.title} {g.count}판
+                            {g.topWinner && (
+                              <>
+                                {' · 최다 우승 '}
+                                <WinnerLink winner={g.topWinner} onOpen={openMember} />
+                              </>
+                            )}
                           </Text>
                         ))}
                       </View>
@@ -262,7 +290,8 @@ export default function HallOfFameScreen() {
                       </Text>
                       {g.topWinner && (
                         <Text style={[styles.caption, { color: c.textSecondary }]}>
-                          최다 우승 {g.topWinner}
+                          {'최다 우승 '}
+                          <WinnerLink winner={g.topWinner} onOpen={openMember} />
                         </Text>
                       )}
                     </View>
@@ -275,6 +304,28 @@ export default function HallOfFameScreen() {
         )}
       </ScrollView>
     </View>
+  );
+}
+
+/** '민수 3승' — 이름 부분만 눌린다. 글 줄 속에 끼는 링크라 줄 전체를 버튼으로 만들지 않는다. */
+function WinnerLink({
+  winner,
+  onOpen,
+}: {
+  winner: NonNullable<TopGame['topWinner']>;
+  onOpen: (member: Member) => void;
+}) {
+  const c = useTheme();
+  return (
+    <Text>
+      <Text
+        onPress={() => onOpen(winner.member)}
+        accessibilityRole="link"
+        style={[styles.nameLink, { color: c.text }]}>
+        {winner.member.name}
+      </Text>
+      {` ${winner.wins}승`}
+    </Text>
   );
 }
 
@@ -312,5 +363,7 @@ const styles = StyleSheet.create({
     marginBottom: Spacing.two,
   },
   barTrack: { flex: 1, height: 14, borderRadius: Radius.full, overflow: 'hidden' },
+  pressed: { opacity: 0.7 },
+  nameLink: { fontWeight: '700' },
   barFill: { height: '100%', borderRadius: Radius.full },
 });

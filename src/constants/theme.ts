@@ -102,6 +102,14 @@ export const TypographyCompact = {
 export const TouchTarget = { min: 44, primary: 56 } as const;
 
 /**
+ * 폰에서의 손가락 크기.
+ *
+ * 데스크탑·태블릿은 화면이 넓어 큰 버튼이 여유로워 보이지만, 폰에서는 56px 버튼 두 개면
+ * 폼의 절반이 버튼이 된다. 최소 안전선(44)은 지키면서 주 버튼만 한 단계 낮춘다.
+ */
+export const TouchTargetCompact = { min: 44, primary: 48 } as const;
+
+/**
  * 카드를 배경에서 떼어 놓는 그림자. 테두리만으로는 목록이 표처럼 보인다.
  * iOS/웹은 shadow*, 안드로이드는 elevation을 봐서 둘 다 준다.
  */

@@ -16,13 +16,27 @@ type Props = {
   onSkip?: () => void;
   /** 변경 모드에서만: 닫기 */
   onClose?: () => void;
+  /**
+   * 변경 모드에서만: 모임 마무리.
+   *
+   * 오늘의 멤버를 정하는 곳이 곧 오늘의 모임을 접는 곳이기도 하다.
+   * 화면 위쪽 바를 없애면서 갈 곳이 없어진 동작이라 여기로 들였다.
+   */
+  onEndSession?: { label: string; danger: boolean; onPress: () => void };
 };
 
 /**
  * 오늘의 멤버 선택. 게임 목록 앞의 게이트로도, 세션 중간의 '변경' 모달로도 쓰인다.
  * 여기서 확정된 인원수가 추천 화면의 인원 필터 기본값이 된다.
  */
-export function SessionSetup({ initialIds, confirmLabel = '시작하기', onConfirm, onSkip, onClose }: Props) {
+export function SessionSetup({
+  initialIds,
+  confirmLabel = '시작하기',
+  onConfirm,
+  onSkip,
+  onClose,
+  onEndSession,
+}: Props) {
   const c = useTheme();
   const t = useType();
   const { members, addMember, removeMember, renameMember, pending, actionError } = useSession();
@@ -231,6 +245,14 @@ export function SessionSetup({ initialIds, confirmLabel = '시작하기', onConf
         {onSkip && (
           <Pressable onPress={onSkip} accessibilityRole="button" style={styles.skip}>
             <Text style={[styles.hint, { color: c.textSecondary }]}>멤버 없이 둘러볼게요</Text>
+          </Pressable>
+        )}
+        {onEndSession && (
+          <Pressable onPress={onEndSession.onPress} accessibilityRole="button" style={styles.skip}>
+            <Text
+              style={[styles.hint, { color: onEndSession.danger ? c.danger : c.textSecondary }]}>
+              {onEndSession.label}
+            </Text>
           </Pressable>
         )}
       </View>

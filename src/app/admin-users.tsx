@@ -7,6 +7,7 @@ import { Icon } from '@/components/icon';
 import { AdminGate, AdminHeader } from '@/components/admin-gate';
 import { Radius, Spacing, TouchTarget } from '@/constants/theme';
 import { useMyProfile } from '@/features/community/hooks';
+import { useOpenProfile } from '@/features/community/navigation';
 import { fetchMembers, removeMemberProfile, setAdmin } from '@/features/community/queries';
 import type { Profile } from '@/features/community/types';
 import { fetchGuestMembers, linkGuestToProfile } from '@/features/plays/queries';
@@ -27,6 +28,7 @@ export default function AdminUsersScreen() {
   const t = useType();
   const insets = useSafeAreaInsets();
   const { profile } = useMyProfile();
+  const openProfile = useOpenProfile();
 
   const [members, setMembers] = useState<Profile[]>([]);
   const [guests, setGuests] = useState<Member[]>([]);
@@ -80,23 +82,30 @@ export default function AdminUsersScreen() {
               <View
                 key={m.id}
                 style={[styles.row, { backgroundColor: c.backgroundElement, borderColor: c.border }]}>
-                <Avatar profile={m} size={40} />
-                <View style={styles.rowText}>
-                  <View style={styles.nameRow}>
-                    <Text style={[t.body, styles.name, { color: c.text }]} numberOfLines={1}>
-                      {m.displayName}
+                {/* 사진·이름을 누르면 그 회원 프로필 — 내보내기 전에 누구인지 확인할 수 있게. */}
+                <Pressable
+                  onPress={() => openProfile(m.id)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${m.displayName} 프로필`}
+                  style={({ pressed }) => [styles.person, pressed && styles.pressed]}>
+                  <Avatar profile={m} size={40} />
+                  <View style={styles.rowText}>
+                    <View style={styles.nameRow}>
+                      <Text style={[t.body, styles.name, { color: c.text }]} numberOfLines={1}>
+                        {m.displayName}
+                      </Text>
+                      {m.isAdmin && (
+                        <View style={[styles.badge, { borderColor: c.accent }]}>
+                          <Text style={[t.caption, styles.badgeText, { color: c.accent }]}>모임장</Text>
+                        </View>
+                      )}
+                    </View>
+                    <Text style={[t.caption, { color: c.textSecondary }]} numberOfLines={1}>
+                      @{m.handle}
+                      {m.realName ? ` · ${m.realName}` : ''}
                     </Text>
-                    {m.isAdmin && (
-                      <View style={[styles.badge, { borderColor: c.accent }]}>
-                        <Text style={[t.caption, styles.badgeText, { color: c.accent }]}>모임장</Text>
-                      </View>
-                    )}
                   </View>
-                  <Text style={[t.caption, { color: c.textSecondary }]} numberOfLines={1}>
-                    @{m.handle}
-                    {m.realName ? ` · ${m.realName}` : ''}
-                  </Text>
-                </View>
+                </Pressable>
 
                 {!me && (
                   <View style={styles.actions}>
@@ -246,6 +255,8 @@ const styles = StyleSheet.create({
     borderRadius: Radius.md,
     borderWidth: StyleSheet.hairlineWidth,
   },
+  person: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
+  pressed: { opacity: 0.6 },
   rowText: { flex: 1, gap: 2 },
   nameRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
   name: { fontWeight: '700', flexShrink: 1 },

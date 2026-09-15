@@ -1,7 +1,15 @@
 import { requireAuth, signIn, signUp } from '@/lib/auth';
 import { supabase } from '@/lib/supabase';
 
-import type { Comment, InviteCode, Meetup, Post, Profile, RsvpStatus } from './types';
+import type {
+  AppNotification,
+  Comment,
+  InviteCode,
+  Meetup,
+  Post,
+  Profile,
+  RsvpStatus,
+} from './types';
 
 /**
  * RLS가 막은 쓰기의 안내문.
@@ -20,6 +28,7 @@ type ProfileRow = {
   avatar_path: string | null;
   bio?: string | null;
   is_admin?: boolean;
+  onboarded_at?: string | null;
 };
 
 function toProfile(row: ProfileRow): Profile {
@@ -31,6 +40,12 @@ function toProfile(row: ProfileRow): Profile {
     avatarPath: row.avatar_path,
     bio: row.bio ?? null,
     isAdmin: row.is_admin ?? false,
+    /**
+     * 칼럼이 아직 없는 DB에서는 키 자체가 안 온다. 그때를 '안 봤다'로 읽으면 기존 회원
+     * 전원에게 안내가 뜨고, 저장은 없는 칼럼에 막혀 실패해 창이 닫히지도 않는다.
+     * 키가 없으면 '이미 봤다'로 친다 — 마이그레이션이 돌면 그때부터 제대로 동작한다.
+     */
+    needsOnboarding: 'onboarded_at' in row && row.onboarded_at == null,
   };
 }
 
@@ -43,6 +58,7 @@ const UNKNOWN: Profile = {
   avatarPath: null,
   bio: null,
   isAdmin: false,
+  needsOnboarding: false,
 };
 
 /* ── 회원 ─────────────────────────────────────────────────────────────── */
@@ -124,6 +140,13 @@ export async function signUpAndJoin(input: {
   // 만들어진 프로필을 그대로 돌려준다 — 호출자가 이 값을 캐시에 바로 넣으면
   // 로그인 이벤트가 유발한 조회와 경합할 일이 없다.
   return redeemInvite(input.code, input.displayName, input.realName);
+}
+
+/** 한 회원의 프로필. 회원끼리만 서로를 볼 수 있다(RLS) — 비회원이면 null이 온다. */
+export async function fetchProfile(id: string): Promise<Profile | null> {
+  const { data, error } = await supabase.from('profiles').select('*').eq('id', id).maybeSingle();
+  if (error) throw new Error(error.message);
+  return data ? toProfile(data as ProfileRow) : null;
 }
 
 export async function fetchMembers(): Promise<Profile[]> {
@@ -296,6 +319,8 @@ export async function updateProfile(input: {
   displayName?: string;
   bio?: string | null;
   avatarPath?: string | null;
+  /** 첫 안내를 마쳤다(또는 건너뛰었다)고 표시 */
+  onboarded?: boolean;
 }): Promise<Profile> {
   await requireAuth();
   const { data: session } = await supabase.auth.getSession();
@@ -303,6 +328,7 @@ export async function updateProfile(input: {
   if (input.displayName !== undefined) patch.display_name = input.displayName.trim();
   if (input.bio !== undefined) patch.bio = input.bio?.trim() || null;
   if (input.avatarPath !== undefined) patch.avatar_path = input.avatarPath;
+  if (input.onboarded) patch.onboarded_at = new Date().toISOString();
 
   const { data, error } = await supabase
     .from('profiles')
@@ -502,6 +528,199 @@ export async function setRsvp(meetupId: string, status: RsvpStatus): Promise<voi
       { onConflict: 'meetup_id,user_id' }
     );
   if (error) throw new Error(error.message);
+}
+
+/* ── 알림 ─────────────────────────────────────────────────────────────── */
+
+/** 알림으로 보여 줄 기간. 그보다 오래된 일은 알림이 아니라 기록이다. */
+const NOTIFY_DAYS = 30;
+const DAY_MS = 86_400_000;
+
+/**
+ * 내게 온 일 — 내 글의 댓글·좋아요, 새 일정, 내 일정의 참석 응답, 다가오는 모임.
+ *
+ * 알림 테이블을 따로 두지 않는다. 필요한 사실(누가·언제)은 이미 각 테이블의 created_at에
+ * 있고, 알림 행을 따로 쌓으면 글을 지워도 알림이 남는 식으로 둘이 어긋난다.
+ * 모임 규모라 필요한 행만 추려 받아 클라이언트에서 엮는다.
+ *
+ * 반환: 최신순, 최대 60개.
+ */
+export async function fetchNotifications(): Promise<AppNotification[]> {
+  const { data: session } = await supabase.auth.getSession();
+  const uid = session.session?.user.id;
+  if (!uid) return [];
+
+  const now = Date.now();
+  const sinceMs = now - NOTIFY_DAYS * DAY_MS;
+  const since = new Date(sinceMs).toISOString();
+
+  const [posts, profiles, meetups, rsvps] = await Promise.all([
+    // 최근 글 100개까지만 본다 — 글 id를 주소에 실어 보내므로 끝없이 늘리면 요청이 길어진다.
+    supabase
+      .from('posts')
+      .select('id,body,image_paths')
+      .eq('author_id', uid)
+      .order('created_at', { ascending: false })
+      .limit(100),
+    supabase.from('profiles').select('*'),
+    supabase.from('meetups').select('id,title,starts_at,place,created_by,created_at'),
+    supabase.from('meetup_rsvps').select('meetup_id,user_id,status,created_at'),
+  ]);
+  for (const r of [posts, profiles, meetups, rsvps]) {
+    if (r.error) throw new Error(r.error.message);
+  }
+
+  type PostRow = { id: string; body: string; image_paths: string[] | null };
+  type LikeRow = { post_id: string; user_id: string; created_at: string };
+  type CommentRow = { id: string; post_id: string; author_id: string; body: string; created_at: string };
+  type MeetupRow = {
+    id: string;
+    title: string;
+    starts_at: string;
+    place: string | null;
+    created_by: string;
+    created_at: string;
+  };
+  type RsvpRow = { meetup_id: string; user_id: string; status: RsvpStatus; created_at: string };
+
+  const myPosts = (posts.data ?? []) as PostRow[];
+  let likeRows: LikeRow[] = [];
+  let commentRows: CommentRow[] = [];
+  if (myPosts.length) {
+    const ids = myPosts.map((p) => p.id);
+    const [likes, comments] = await Promise.all([
+      supabase
+        .from('post_likes')
+        .select('post_id,user_id,created_at')
+        .in('post_id', ids)
+        .neq('user_id', uid)
+        .gte('created_at', since),
+      supabase
+        .from('post_comments')
+        .select('id,post_id,author_id,body,created_at')
+        .in('post_id', ids)
+        .neq('author_id', uid)
+        .gte('created_at', since)
+        .order('created_at', { ascending: false })
+        .limit(100),
+    ]);
+    if (likes.error) throw new Error(likes.error.message);
+    if (comments.error) throw new Error(comments.error.message);
+    likeRows = (likes.data ?? []) as LikeRow[];
+    commentRows = (comments.data ?? []) as CommentRow[];
+  }
+
+  const people = new Map(((profiles.data ?? []) as ProfileRow[]).map((p) => [p.id, toProfile(p)]));
+  const person = (id: string) => people.get(id) ?? UNKNOWN;
+  // 서버 문자열(+00:00)과 브라우저 문자열(Z)이 섞이면 글자 비교가 틀린다. 한 형식으로 맞춘다.
+  const iso = (value: string | number) => new Date(value).toISOString();
+  const ms = (value: string) => new Date(value).getTime();
+
+  const postById = new Map(myPosts.map((p) => [p.id, p]));
+  const blank = {
+    postId: null,
+    postImage: null,
+    postText: null,
+    commentText: null,
+    meetup: null,
+    rsvpStatus: null,
+  };
+  const aboutPost = (postId: string) => {
+    const p = postById.get(postId);
+    return {
+      postId,
+      postImage: p?.image_paths?.[0] ?? null,
+      postText: p?.body ? p.body.slice(0, 80) : null,
+    };
+  };
+
+  const items: AppNotification[] = [];
+
+  for (const c of commentRows) {
+    items.push({
+      ...blank,
+      ...aboutPost(c.post_id),
+      id: `comment:${c.id}`,
+      kind: 'comment',
+      at: iso(c.created_at),
+      actors: [person(c.author_id)],
+      commentText: c.body.slice(0, 80),
+    });
+  }
+
+  // 좋아요는 글마다 한 줄 — 좋아요 열 개가 알림 열 줄이면 댓글이 묻힌다.
+  const likesByPost = new Map<string, LikeRow[]>();
+  for (const l of likeRows) {
+    const list = likesByPost.get(l.post_id) ?? [];
+    list.push(l);
+    likesByPost.set(l.post_id, list);
+  }
+  for (const [postId, rows] of likesByPost) {
+    rows.sort((a, b) => ms(b.created_at) - ms(a.created_at));
+    items.push({
+      ...blank,
+      ...aboutPost(postId),
+      id: `like:${postId}`,
+      kind: 'like',
+      at: iso(rows[0].created_at),
+      actors: rows.map((r) => person(r.user_id)),
+    });
+  }
+
+  const meetupRows = (meetups.data ?? []) as MeetupRow[];
+  const meetupById = new Map(meetupRows.map((m) => [m.id, m]));
+  const aboutMeetup = (m: MeetupRow) => ({
+    meetup: { id: m.id, title: m.title, startsAt: m.starts_at, place: m.place },
+  });
+
+  for (const m of meetupRows) {
+    if (m.created_by === uid || ms(m.created_at) < sinceMs) continue;
+    items.push({
+      ...blank,
+      ...aboutMeetup(m),
+      id: `meetup:${m.id}`,
+      kind: 'meetup',
+      at: iso(m.created_at),
+      actors: [person(m.created_by)],
+    });
+  }
+
+  for (const r of (rsvps.data ?? []) as RsvpRow[]) {
+    const m = meetupById.get(r.meetup_id);
+    if (!m) continue;
+
+    // 내가 만든 일정에 다른 사람이 답했다 — 모임을 꾸리는 사람이 제일 궁금한 소식이다.
+    if (m.created_by === uid && r.user_id !== uid && ms(r.created_at) >= sinceMs) {
+      items.push({
+        ...blank,
+        ...aboutMeetup(m),
+        id: `rsvp:${m.id}:${r.user_id}`,
+        kind: 'rsvp',
+        at: iso(r.created_at),
+        actors: [person(r.user_id)],
+        rsvpStatus: r.status,
+      });
+    }
+
+    // 간다고 한(또는 아마도) 모임이 24시간 안으로 들어왔다. 시각은 '24시간 전이 된 순간'으로 둔다 —
+    // 그래야 그 순간 이후 알림함을 안 연 사람에게 새 알림으로 뜬다.
+    if (r.user_id === uid && r.status !== 'no') {
+      const start = ms(m.starts_at);
+      const from = start - DAY_MS;
+      if (now >= from && now < start) {
+        items.push({
+          ...blank,
+          ...aboutMeetup(m),
+          id: `soon:${m.id}`,
+          kind: 'soon',
+          at: iso(from),
+          actors: [],
+        });
+      }
+    }
+  }
+
+  return items.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0)).slice(0, 60);
 }
 
 /* ── 관리 (모임장 전용) ───────────────────────────────────────────────── */

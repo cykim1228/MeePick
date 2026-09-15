@@ -28,6 +28,8 @@ export default function Root({ children }: PropsWithChildren) {
 
         {/* iOS 홈 화면 추가 */}
         <link rel="apple-touch-icon" href="/icon-192.png" />
+        {/* 표준 이름과 iOS 옛 이름을 함께 둔다 — 사파리가 아직 옛 이름을 본다. */}
+        <meta name="mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-status-bar-style" content="default" />
         <meta name="apple-mobile-web-app-title" content="MeePick" />

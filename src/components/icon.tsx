@@ -28,7 +28,8 @@ export type IconName =
   | 'image'
   | 'lock'
   | 'chevronRight'
-  | 'search';
+  | 'search'
+  | 'bell';
 
 export function Icon({
   name,
@@ -162,6 +163,17 @@ export function Icon({
       )}
 
       {name === 'chevronRight' && <Path d="M9.5 5.5 16 12l-6.5 6.5" {...common} />}
+
+      {name === 'bell' && (
+        <>
+          <Path
+            d="M6.2 16.8V11a5.8 5.8 0 0 1 11.6 0v5.8l1.6 1.8H4.6z"
+            {...common}
+            fill={filled ? stroke : 'none'}
+          />
+          <Path d="M10 20.6a2.2 2.2 0 0 0 4 0" {...common} />
+        </>
+      )}
 
       {name === 'search' && (
         <>

@@ -134,7 +134,8 @@ export function computeMonthly(plays: Play[]): { month: string; count: number }[
 export type TopGame = {
   title: string;
   count: number;
-  topWinner: string | null;
+  /** 사람까지 들고 있는다 — 화면에서 이름을 누르면 그 사람 프로필로 가야 한다. */
+  topWinner: { member: Member; wins: number } | null;
 };
 
 export function computeTopGames(
@@ -162,11 +163,11 @@ export function computeTopGames(
     .slice(0, limit)
     .map((entry) => {
       const top = [...entry.wins.entries()].sort((a, b) => b[1] - a[1])[0];
-      const name = top ? members.find((m) => m.id === top[0])?.name : undefined;
+      const member = top ? members.find((m) => m.id === top[0]) : undefined;
       return {
         title: entry.title,
         count: entry.count,
-        topWinner: top && name ? `${name} ${top[1]}승` : null,
+        topWinner: top && member ? { member, wins: top[1] } : null,
       };
     });
 }

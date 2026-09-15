@@ -19,6 +19,8 @@ import { CollapsibleFilterSection } from '@/components/filter-section';
 import { GameDetail } from '@/components/game-detail';
 import { GameForm } from '@/components/game-form';
 import { PlaySheet } from '@/components/play-sheet';
+import { Fab } from '@/components/fab';
+import { ScreenTitle } from '@/components/screen-title';
 import { SessionSetup } from '@/components/session-setup';
 import { EmptyView, ErrorView, LoadingView } from '@/components/state-views';
 import { Radius, Spacing, TouchTarget, Typography } from '@/constants/theme';
@@ -44,9 +46,9 @@ import { usePlayHistory, useSession } from '@/features/plays/hooks';
 import { computeStandings } from '@/features/plays/stats';
 import { useElapsedMinutes } from '@/hooks/use-elapsed-minutes';
 import { useGridColumns } from '@/hooks/use-grid-columns';
+import { gridKey, useGridRows } from '@/hooks/use-grid-rows';
 import { useConfirmOnce } from '@/hooks/use-confirm-once';
 import { useTheme } from '@/hooks/use-theme';
-import { useType } from '@/hooks/use-type';
 import { localDateOf, localToday } from '@/lib/dates';
 
 const PLAYER_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
@@ -72,7 +74,6 @@ const SORTS: { key: SortKey; label: string }[] = [
 
 export default function RecommendScreen() {
   const c = useTheme();
-  const t = useType();
   const insets = useSafeAreaInsets();
   const session = useSession();
   // 게임 목록은 모임의 공용 자산이라 모임장만 고친다.
@@ -95,11 +96,7 @@ export default function RecommendScreen() {
   const [themeSectionOpen, setThemeSectionOpen] = useState(false);
   const [mechanicsSectionOpen, setMechanicsSectionOpen] = useState(false);
 
-  const { columns, width, onLayout } = useGridColumns(240);
-  // 마지막 줄에 카드가 모자라도 크기가 같도록 폭을 고정 계산한다. flex 분배에 맡기면 늘어난다.
-  const cardWidth = Math.floor(
-    (width - Spacing.four * 2 - Spacing.three * (columns - 1)) / columns
-  );
+  const { columns, onLayout } = useGridColumns(240);
 
   /**
    * 오늘 온 사람들 중 계정이 있는 사람. 이 사람들이 하트를 누른 게임이 추천 위로 올라온다.
@@ -110,6 +107,8 @@ export default function RecommendScreen() {
     [session.sessionMembers]
   );
   const { all, games, loading, error, reload } = useGames(filter, audience);
+  // 마지막 줄을 빈 칸으로 메워, 남은 카드가 줄 전체로 늘어나지 않게 한다.
+  const cells = useGridRows(games, columns);
   const selected = useMemo(() => games.find((g) => g.id === selectedId) ?? null, [games, selectedId]);
   const categoryOptions = useMemo(() => countBy(all, 'categories').map(([v]) => v), [all]);
   const alternatives = useMemo(
@@ -307,56 +306,6 @@ export default function RecommendScreen() {
         </Pressable>
       )}
 
-      {/* 오늘의 멤버 바 — 멤버가 없어도(둘러보기) 항상 보여, 언제든 세션을 시작할 수 있다.
-          숨기면 '둘러볼게요'를 누른 뒤 멤버를 고를 진입점이 사라진다. */}
-      {!session.error && (
-        <View style={[styles.sessionBar, { backgroundColor: c.backgroundElement, borderColor: c.border }]}>
-          {/* 일정에서 시작한 모임이면 어느 모임인지 붙여 준다 — 판이 그 일정에 묶이고 있음을
-              알 수 있어야, 나중에 "왜 여기 붙었지"가 되지 않는다. */}
-          {session.meetup && (
-            <View style={[styles.meetupTag, { borderColor: c.badgeRecommended }]}>
-              <Text style={[styles.caption, { color: c.badgeRecommended }]} numberOfLines={1}>
-                {session.meetup.title}
-              </Text>
-            </View>
-          )}
-          <Text
-            style={[
-              styles.sessionText,
-              { color: session.memberIds.length ? c.text : c.textSecondary },
-            ]}
-            numberOfLines={1}>
-            {session.memberIds.length ? (
-              <>
-                {session.sessionMembers.map((m) => m.name).join(' · ')}
-                <Text style={{ color: c.textSecondary }}> · {session.memberIds.length}명</Text>
-              </>
-            ) : (
-              '멤버 없이 둘러보는 중'
-            )}
-          </Text>
-          <Pressable
-            onPress={() => setChangingMembers(true)}
-            accessibilityRole="button"
-            style={styles.sessionChange}>
-            <Text style={[styles.caption, { color: c.accent, fontWeight: '600' }]}>
-              {session.memberIds.length ? '변경' : '멤버 선택'}
-            </Text>
-          </Pressable>
-          {session.memberIds.length > 0 && !session.activePlay && (
-            <Pressable onPress={endSession} accessibilityRole="button" style={styles.sessionChange}>
-              <Text
-                style={[
-                  styles.caption,
-                  { color: endConfirm.pendingId ? c.danger : c.textSecondary, fontWeight: '600' },
-                ]}>
-                {endConfirm.pendingId ? '정말 마무리?' : '마무리'}
-              </Text>
-            </Pressable>
-          )}
-        </View>
-      )}
-
       {session.actionError && (
         <Text style={[styles.caption, { color: c.danger }]}>{session.actionError}</Text>
       )}
@@ -408,10 +357,14 @@ export default function RecommendScreen() {
         </View>
       )}
 
-      <Text style={[styles.h1, t.display, { color: c.text }]}>오늘 뭐 할까?</Text>
-      <Text style={[styles.sub, { color: c.textSecondary }]}>
-        조건을 고르면 지금 하기 좋은 순서로 보여드려요.
-      </Text>
+      <ScreenTitle
+        title="오늘 뭐 할까?"
+        subtitle={
+          session.meetup
+            ? `${session.meetup.title} 진행 중`
+            : '조건을 고르면 지금 하기 좋은 순서로 보여드려요.'
+        }
+      />
 
       <TextInput
         value={filter.query}
@@ -551,22 +504,24 @@ export default function RecommendScreen() {
       // numColumns가 바뀌면 key도 바꿔야 RN이 리스트를 재생성한다.
       key={`grid-${columns}`}
       numColumns={columns}
-      data={games}
-      keyExtractor={(g) => g.id}
+      data={cells}
+      keyExtractor={gridKey}
       ListHeaderComponent={header}
       columnWrapperStyle={columns > 1 ? styles.column : undefined}
       contentContainerStyle={[styles.listContent, { paddingBottom: insets.bottom + Spacing.six }]}
       renderItem={({ item }) => (
-        <View style={{ width: cardWidth }}>
-          <GameCard
-            game={item}
-            playerCount={filter.playerCount}
-            selected={item.id === selectedId}
-            liked={likes.mine(item.id)}
-            likeCount={likes.count(item.id)}
-            onPress={() => setSelectedId(item.id)}
-            onToggleLike={me.isMember ? () => void likes.toggle(item.id) : undefined}
-          />
+        <View style={styles.cell}>
+          {item && (
+            <GameCard
+              game={item}
+              playerCount={filter.playerCount}
+              selected={item.id === selectedId}
+              liked={likes.mine(item.id)}
+              likeCount={likes.count(item.id)}
+              onPress={() => setSelectedId(item.id)}
+              onToggleLike={me.isMember ? () => void likes.toggle(item.id) : undefined}
+            />
+          )}
         </View>
       )}
       ListEmptyComponent={
@@ -595,10 +550,25 @@ export default function RecommendScreen() {
           visible
           game={editing}
           categoryOptions={categoryOptions}
+          themeOptions={themesAll}
+          mechanicOptions={mechanicsAll}
           onClose={() => setEditing(null)}
           onDeleted={() => setSelectedId(null)}
         />
       )}
+      {/* 오늘의 멤버 — 인원수만 보여 주고 누르면 고르는 창이 뜬다.
+          목록 위쪽에 바로 두면 스크롤을 내리는 순간 사라져, 중간에 사람이 늘거나 빠졌을 때
+          맨 위까지 되돌아가야 했다. */}
+      {!session.error && (
+        <Fab
+          icon="user"
+          label={session.memberIds.length ? `${session.memberIds.length}명` : '멤버 선택'}
+          accessibilityLabel="오늘의 멤버 고르기"
+          tone={session.memberIds.length ? 'neutral' : 'accent'}
+          onPress={() => setChangingMembers(true)}
+        />
+      )}
+
       <Modal visible={changingMembers} animationType="slide" onRequestClose={() => setChangingMembers(false)}>
         <View style={{ flex: 1, paddingTop: insets.top, backgroundColor: c.background }}>
           <SessionSetup
@@ -611,6 +581,19 @@ export default function RecommendScreen() {
               });
             }}
             onClose={() => setChangingMembers(false)}
+            onEndSession={
+              session.memberIds.length > 0 && !session.activePlay
+                ? {
+                    label: endConfirm.pendingId ? '정말 마무리할까요?' : '모임 마무리',
+                    danger: endConfirm.pendingId !== null,
+                    onPress: () => {
+                      endSession();
+                      // 리캡이 뜨거나 세션이 닫히므로 창은 닫는다.
+                      if (endConfirm.pendingId) setChangingMembers(false);
+                    },
+                  }
+                : undefined
+            }
           />
         </View>
       </Modal>
@@ -673,6 +656,8 @@ const styles = StyleSheet.create({
   screen: { flex: 1 },
   listContent: { padding: Spacing.four, gap: Spacing.three },
   column: { gap: Spacing.three },
+  // 칸을 flex로 두면 줄이 언제나 정확히 채워진다 — 폭을 몇 픽셀 잘못 재도 여백이 남지 않는다.
+  cell: { flex: 1 },
   controls: { gap: Spacing.two, paddingBottom: Spacing.four },
   sessionBar: {
     flexDirection: 'row',
@@ -683,8 +668,6 @@ const styles = StyleSheet.create({
     borderRadius: Radius.md,
     borderWidth: 1,
   },
-  sessionText: { ...Typography.body, flex: 1 },
-  sessionChange: { minHeight: TouchTarget.min, justifyContent: 'center', paddingHorizontal: Spacing.two },
   playingBanner: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -739,16 +722,7 @@ const styles = StyleSheet.create({
   },
   recapTitle: { fontSize: 52, lineHeight: 68, fontFamily: 'Jua_400Regular' },
   recapLine: { ...Typography.subtitle, textAlign: 'center' },
-  meetupTag: {
-    borderWidth: 1,
-    borderRadius: Radius.full,
-    paddingHorizontal: Spacing.two,
-    paddingVertical: 2,
-    maxWidth: 140,
-  },
   recapActions: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.two, justifyContent: 'center' },
-  h1: { ...Typography.display, marginTop: Spacing.two },
-  sub: { ...Typography.body, marginBottom: Spacing.two },
   groupLabel: { ...Typography.label, marginTop: Spacing.three },
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.two, paddingRight: Spacing.three },
   countRow: {

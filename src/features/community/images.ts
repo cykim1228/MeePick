@@ -1,32 +1,15 @@
 import { Platform } from 'react-native';
 
+import { mediaBase, NAS_PREFIX, nasUrl } from '@/lib/media';
 import { supabase, supabaseUrl } from '@/lib/supabase';
 
 /** 예전 저장소. NAS로 옮기기 전에 올린 사진들이 여기 남아 있다. */
 const LEGACY_BUCKET = 'post-images';
 
-/**
- * NAS에 올린 사진의 표식.
- *
- * DB에는 경로만 들어 있고, 그 경로가 NAS 것인지 Supabase 것인지 구별할 방법이 필요하다.
- * 생김새로 짐작할 수도 있지만(`2026/08/…` 대 `<uid>/<uuid>…`) 그런 눈치는 나중에
- * 반드시 틀린다. 접두사를 붙여 대놓고 표시한다.
- */
-const NAS_PREFIX = 'nas/';
-
-/**
- * 사진이 어디서 오는지.
- *
- * 배포본은 **자기 오리진의 `/media`** 를 쓴다. nginx가 NAS의 Photo/Server 폴더를
- * 그 경로로 서빙하며, 같은 오리진이라 https 페이지에서 혼합 콘텐츠로 막힐 일이 없다.
- * 개발 서버(8081)에는 그 경로가 없으므로 `.env`의 NAS 주소로 우회한다.
- */
-const configuredBase = (process.env.EXPO_PUBLIC_MEDIA_BASE_URL ?? '').replace(/\/$/, '');
-const mediaBase = !__DEV__ && Platform.OS === 'web' ? '/media' : configuredBase || '/media';
-
 export function postImageUrl(path: string): string | null {
   if (!path) return null;
-  if (path.startsWith(NAS_PREFIX)) return `${mediaBase}/${path.slice(NAS_PREFIX.length)}`;
+  const nas = nasUrl(path);
+  if (nas) return nas;
   // 접두사가 없으면 NAS로 옮기기 전에 올린 사진이다. 옛 주소를 그대로 유지한다 —
   // 한 번에 이사시키지 않아도 과거 글이 깨지지 않는다.
   if (!supabaseUrl) return null;
@@ -36,13 +19,13 @@ export function postImageUrl(path: string): string | null {
 /** 웹에서만 사진을 고를 수 있다. 네이티브는 이미지 선택기 도입 후 열린다. */
 export const canPickImage = Platform.OS === 'web';
 
-/** 파일 선택창. 취소하면 빈 배열. */
-export function pickImages(): Promise<File[]> {
+/** 파일 선택창. 취소하면 빈 배열. multi=false면 한 장만 고른다. */
+export function pickImages(multi = true): Promise<File[]> {
   return new Promise((resolve) => {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = 'image/*';
-    input.multiple = true;
+    input.multiple = multi;
     input.onchange = () => resolve(Array.from(input.files ?? []));
     // 취소를 감지할 표준 이벤트가 없다. 창이 닫히며 포커스가 돌아오면 빈 결과로 끝낸다.
     window.addEventListener('focus', () => setTimeout(() => resolve([]), 500), { once: true });

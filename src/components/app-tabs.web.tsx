@@ -9,6 +9,7 @@ import { Icon, type IconName } from '@/components/icon';
 import { Radius, Spacing, TouchTarget, Typography } from '@/constants/theme';
 import { refreshActivity, useUnread } from '@/features/community/activity';
 import { useMyProfile } from '@/features/community/hooks';
+import { refreshInboxIfOld, useInbox } from '@/features/community/notifications';
 import { useBreakpoint } from '@/hooks/use-breakpoint';
 import { useTheme } from '@/hooks/use-theme';
 
@@ -41,8 +42,8 @@ type TabDef = {
 const TABS: TabDef[] = [
   { name: 'feed', href: '/feed', label: '피드', icon: 'home', onPhone: true },
   { name: 'meetups', href: '/meetups', label: '일정', icon: 'calendar', onPhone: true },
-  { name: 'home', href: '/', label: '추천', icon: 'dice', onPhone: true },
-  { name: 'explore', href: '/explore', label: '전체', icon: 'grid', onPhone: false },
+  { name: 'home', href: '/', label: '게임', icon: 'dice', onPhone: true },
+  { name: 'explore', href: '/explore', label: '목록', icon: 'grid', onPhone: false },
   { name: 'wishlist', href: '/wishlist', label: '위시', icon: 'star', onPhone: false },
   { name: 'history', href: '/history', label: '기록', icon: 'list', onPhone: true },
   { name: 'hall-of-fame', href: '/hall-of-fame', label: '전당', icon: 'trophy', onPhone: false },
@@ -53,17 +54,30 @@ const TABS: TabDef[] = [
   { name: 'admin-posts', href: '/admin-posts', label: '피드 관리', icon: 'list', onPhone: false, offBar: true },
   // 초대 링크가 도착하는 곳. 바에는 없지만 등록은 해야 그 주소로 들어올 수 있다.
   { name: 'join', href: '/join', label: '초대', icon: 'user', onPhone: false, offBar: true },
+  // 다른 회원 프로필. 사람을 누르면 들어온다.
+  { name: 'member', href: '/member', label: '회원', icon: 'user', onPhone: false, offBar: true },
+  // 글 하나. 프로필 격자에서 글을 누르면 들어온다.
+  { name: 'post', href: '/post', label: '글', icon: 'message', onPhone: false, offBar: true },
+  // 모임 하나. 일정 카드·달력·알림에서 들어온다.
+  { name: 'meetup', href: '/meetup', label: '모임', icon: 'calendar', onPhone: false, offBar: true },
+  // 알림함. 피드 위의 종에서 들어온다.
+  { name: 'notifications', href: '/notifications', label: '알림', icon: 'bell', onPhone: false, offBar: true },
 ];
 
 export default function AppTabs() {
   const atBottom = useBreakpoint() !== 'expanded';
   const { isMember } = useMyProfile();
   const unread = useUnread(isMember);
+  // 새 알림이 있으면 피드 탭에도 점을 붙인다 — 종은 피드 화면 안에 있어서, 다른 탭에 있으면 안 보인다.
+  const inbox = useInbox(isMember);
   // 화면을 옮길 때마다 다시 확인한다. 주기적으로 폴링하면 배터리만 먹는다 —
   // 어차피 점을 보는 순간은 사람이 앱을 만지고 있을 때다.
   const pathname = usePathname();
   useEffect(() => {
-    if (isMember) void refreshActivity();
+    if (!isMember) return;
+    void refreshActivity();
+    // '모임 하루 전'처럼 시간이 흘러야 생기는 알림은 활동 시각으로 못 잡는다.
+    refreshInboxIfOld();
   }, [pathname, isMember]);
 
   // 감추는 탭도 TabList에는 남긴다 — 트리거를 빼면 그 경로로 이동할 수 없다.
@@ -74,15 +88,22 @@ export default function AppTabs() {
       <TabButton
         icon={t.icon}
         hidden={t.offBar || (atBottom && !t.onPhone)}
-        unread={t.name === 'feed' ? unread.feed : t.name === 'meetups' ? unread.meetups : false}>
+        unread={
+          t.name === 'feed'
+            ? unread.feed || inbox.hasUnread
+            : t.name === 'meetups'
+              ? unread.meetups
+              : false
+        }>
         {t.label}
       </TabButton>
     </TabTrigger>
   ));
 
   // TabList와 TabSlot의 **순서**가 바의 위치를 정한다. 순서만 바꾸면 같은 트리거를 재사용할 수 있다.
+  // 뒤로는 '왔던 탭'으로 간다. 기본값(firstRoute)이면 일정에서 회원 프로필을 열고 뒤로를 눌러도 피드로 떨어진다.
   return (
-    <Tabs style={styles.tabs}>
+    <Tabs style={styles.tabs} options={{ backBehavior: 'history' }}>
       {atBottom ? (
         <>
           <TabSlot style={styles.slot} />

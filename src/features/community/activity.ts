@@ -22,12 +22,28 @@ type Store = {
   /** 피드 쪽에서 가장 최근에 일어난 일(글 또는 댓글) */
   feedAt: string | null;
   meetupAt: string | null;
+  /**
+   * 좋아요·참석 응답이 마지막으로 생긴 시각. 탭의 점에는 쓰지 않는다 — 남의 글에 달린 좋아요로
+   * 피드에 점이 켜지면 소음이다. 알림함이 "내게 온 게 있나" 다시 받을 때만 본다.
+   */
+  likeAt: string | null;
+  rsvpAt: string | null;
+  /** 활동 시각을 한 번이라도 읽어 왔는가. '아직 모름'과 '활동이 없음(null)'을 가른다 */
+  fetched: boolean;
   /** 탭별로 마지막으로 열어 본 시각 */
   seen: Record<ActivityTab, string | null>;
   ready: boolean;
 };
 
-let store: Store = { feedAt: null, meetupAt: null, seen: { feed: null, meetups: null }, ready: false };
+let store: Store = {
+  feedAt: null,
+  meetupAt: null,
+  likeAt: null,
+  rsvpAt: null,
+  fetched: false,
+  seen: { feed: null, meetups: null },
+  ready: false,
+};
 const listeners = new Set<() => void>();
 
 function setStore(next: Partial<Store>) {
@@ -45,7 +61,9 @@ function subscribe(listener: () => void) {
 const snapshot = () => store;
 
 /** 한 테이블의 가장 최근 created_at. 권한이 없거나 비어 있으면 null. */
-async function latest(table: 'posts' | 'post_comments' | 'meetups'): Promise<string | null> {
+async function latest(
+  table: 'posts' | 'post_comments' | 'meetups' | 'post_likes' | 'meetup_rsvps'
+): Promise<string | null> {
   const { data, error } = await supabase
     .from(table)
     .select('created_at')
@@ -62,14 +80,16 @@ export function refreshActivity(): Promise<void> {
   if (inflight) return inflight;
   inflight = (async () => {
     try {
-      const [post, comment, meetup] = await Promise.all([
+      const [post, comment, meetup, like, rsvp] = await Promise.all([
         latest('posts'),
         latest('post_comments'),
         latest('meetups'),
+        latest('post_likes'),
+        latest('meetup_rsvps'),
       ]);
       // 글과 댓글 중 더 최근 것이 '피드에서 일어난 마지막 일'이다.
       const feedAt = [post, comment].filter(Boolean).sort().pop() ?? null;
-      setStore({ feedAt, meetupAt: meetup });
+      setStore({ feedAt, meetupAt: meetup, likeAt: like, rsvpAt: rsvp, fetched: true });
     } catch {
       // 못 읽으면 점이 안 뜰 뿐이다. 화면을 막을 일이 아니다.
     } finally {
@@ -79,29 +99,32 @@ export function refreshActivity(): Promise<void> {
   return inflight;
 }
 
-let hydrated = false;
+let hydrating: Promise<void> | null = null;
 
-async function hydrateSeen() {
-  if (hydrated) return;
-  hydrated = true;
-  try {
-    const raw = await AsyncStorage.getItem(SEEN_KEY);
-    const saved: unknown = raw ? JSON.parse(raw) : null;
-    if (saved && typeof saved === 'object') {
-      const s = saved as Partial<Record<ActivityTab, unknown>>;
-      setStore({
-        seen: {
-          feed: typeof s.feed === 'string' ? s.feed : null,
-          meetups: typeof s.meetups === 'string' ? s.meetups : null,
-        },
-        ready: true,
-      });
-      return;
+/** 저장된 '마지막으로 본 시각'을 읽어 온다. 여러 번 불러도 한 번만 읽는다. */
+function hydrateSeen(): Promise<void> {
+  if (hydrating) return hydrating;
+  hydrating = (async () => {
+      try {
+      const raw = await AsyncStorage.getItem(SEEN_KEY);
+      const saved: unknown = raw ? JSON.parse(raw) : null;
+      if (saved && typeof saved === 'object') {
+        const s = saved as Partial<Record<ActivityTab, unknown>>;
+        setStore({
+          seen: {
+            feed: typeof s.feed === 'string' ? s.feed : null,
+            meetups: typeof s.meetups === 'string' ? s.meetups : null,
+          },
+          ready: true,
+        });
+        return;
+      }
+    } catch {
+      // 저장소를 못 읽으면 처음 열어 보는 것으로 친다.
     }
-  } catch {
-    // 저장소를 못 읽으면 처음 열어 보는 것으로 친다.
-  }
-  setStore({ ready: true });
+    setStore({ ready: true });
+  })();
+  return hydrating;
 }
 
 /**
@@ -118,6 +141,63 @@ export function markSeen(tab: ActivityTab) {
   AsyncStorage.setItem(SEEN_KEY, JSON.stringify(seen)).catch(() => {
     // 유지되지 않으면 다음에 점이 한 번 더 뜰 뿐이다.
   });
+}
+
+/**
+ * 그 탭 화면에서 부른다 — 화면을 보고 있는 동안 새 활동이 들어오면 곧바로 '봤다'로 넘긴다.
+ *
+ * 화면이 뜰 때 한 번만 적으면 안 되는 이유가 둘이다.
+ *   1) 탭 화면은 옮겨 다녀도 **마운트된 채 남는다.** 다시 돌아와도 마운트 시점의 effect는
+ *      다시 돌지 않아, 점이 켜진 채로 굳는다.
+ *   2) 댓글이 달려도 **글 개수는 그대로**다. 목록 길이를 조건으로 삼으면 댓글로 켜진 점은
+ *      영영 꺼지지 않는다.
+ * 그래서 '화면에 있는가'와 '마지막 활동 시각'을 함께 본다.
+ */
+export function useMarkSeen(tab: ActivityTab, active: boolean) {
+  const s = useSyncExternalStore(subscribe, snapshot, snapshot);
+  const at = tab === 'feed' ? s.feedAt : s.meetupAt;
+
+  useEffect(() => {
+    if (!active || !at) return;
+    void hydrateSeen().then(() => markSeen(tab));
+  }, [tab, active, at]);
+}
+
+/**
+ * 그 탭에서 가장 최근에 일어난 일의 시각. 아직 한 번도 읽지 않았으면 undefined.
+ *
+ * 목록 캐시가 "내가 받은 뒤로 새로 올라온 게 있나"를 판단할 때 쓴다 — 목록을 통째로
+ * 다시 받아 비교하지 않고, 이미 탭 바가 받아 둔 시각 한 줄과 견준다.
+ */
+export function activityAt(tab: ActivityTab): string | null | undefined {
+  if (!store.fetched) return undefined;
+  return tab === 'feed' ? store.feedAt : store.meetupAt;
+}
+
+/**
+ * 알림함이 따라가는 시각 — 글·댓글·일정·좋아요·참석 응답 중 무엇이든 새로 생기면 바뀐다.
+ * 아직 한 번도 읽지 않았으면 undefined.
+ */
+export function activityKey(): string | undefined {
+  if (!store.fetched) return undefined;
+  return keyOf(store);
+}
+
+export function useActivityKey(): string | undefined {
+  const s = useSyncExternalStore(subscribe, snapshot, snapshot);
+  if (!s.fetched) return undefined;
+  return keyOf(s);
+}
+
+function keyOf(s: Store): string {
+  return [s.feedAt, s.meetupAt, s.likeAt, s.rsvpAt].map((v) => v ?? '-').join('|');
+}
+
+/** activityAt의 구독판. 값이 바뀌면 다시 그린다. */
+export function useActivityAt(tab: ActivityTab): string | null | undefined {
+  const s = useSyncExternalStore(subscribe, snapshot, snapshot);
+  if (!s.fetched) return undefined;
+  return tab === 'feed' ? s.feedAt : s.meetupAt;
 }
 
 /** 탭 바에서 쓴다. 회원이 아니면 항상 false — 어차피 내용이 보이지 않는다. */

@@ -1,24 +1,37 @@
-import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Avatar } from '@/components/avatar';
+import { CenterModal } from '@/components/center-modal';
+import { GameDetail } from '@/components/game-detail';
 import { Icon, type IconName } from '@/components/icon';
 import { LoginModal } from '@/components/login-modal';
 import { MemberGate } from '@/components/member-gate';
+import {
+  GameGrid,
+  PostGrid,
+  ProfileStat,
+  RecentPlays,
+  RecordCard,
+} from '@/components/profile-parts';
 import { LoadingView } from '@/components/state-views';
-import { Radius, Spacing, TouchTarget, Typography } from '@/constants/theme';
+import { Radius, Spacing, TouchTarget } from '@/constants/theme';
 import { useFeed, useMyProfile } from '@/features/community/hooks';
+import { openHistoryOf, openPost } from '@/features/community/navigation';
 import { fetchInvites } from '@/features/community/queries';
-import { canPickImage, pickImages, postImageUrl, uploadPostImage } from '@/features/community/images';
+import { useGames, useWishlist } from '@/features/games/hooks';
+import { useGameLikeStore } from '@/features/games/likes';
+import type { Game } from '@/features/games/types';
+import { usePlayHistory, useSession } from '@/features/plays/hooks';
+import { computeMemberRecord } from '@/features/plays/record';
+import { canPickImage, pickImages, uploadPostImage } from '@/features/community/images';
 import { useAuthed } from '@/hooks/use-auth';
 import { useTheme } from '@/hooks/use-theme';
 import { useType } from '@/hooks/use-type';
 import { signOut } from '@/lib/auth';
 import { appOrigin, copyText } from '@/lib/clipboard';
-import { timeAgo } from '@/lib/dates';
 
 /**
  * 폰 하단 바에서 빠진 메뉴들이 여기로 들어온다.
@@ -31,8 +44,8 @@ const ADMIN_MENU: { href: string; label: string; icon: IconName }[] = [
 ];
 
 const MENU: { href: string; label: string; icon: IconName }[] = [
-  { href: '/', label: '오늘 뭐 할까 (추천)', icon: 'dice' },
-  { href: '/explore', label: '전체 게임', icon: 'grid' },
+  { href: '/', label: '오늘 뭐 할까 (게임)', icon: 'dice' },
+  { href: '/explore', label: '게임 목록', icon: 'grid' },
   { href: '/wishlist', label: '위시리스트', icon: 'star' },
   { href: '/history', label: '플레이 기록', icon: 'list' },
   { href: '/hall-of-fame', label: '명예의 전당', icon: 'trophy' },
@@ -59,6 +72,38 @@ export default function ProfileScreen() {
   const [bio, setBio] = useState('');
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * 내 전적.
+   *
+   * 플레이 기록은 members 행에 걸려 있고, 계정과 그 행은 profile_id로 이어져 있다.
+   * 아직 안 이어진 사람(손님으로만 기록이 쌓인 경우)은 전적이 안 보이는 게 정상이라,
+   * 그 사실을 숨기지 않고 이유를 알려 준다 — 안 그러면 "내 기록이 없어졌다"가 된다.
+   */
+  const { members } = useSession();
+  const { plays } = usePlayHistory();
+  const myMember = useMemo(
+    () => members.find((m) => m.profileId === profile?.id) ?? null,
+    [members, profile?.id]
+  );
+
+  const record = useMemo(
+    () => (myMember ? computeMemberRecord(plays, myMember) : null),
+    [plays, myMember]
+  );
+
+  /** 내가 하트한 게임 — 온보딩에서 고른 것을 나중에 다시 보고 고칠 곳이 여기다. */
+  const { all: owned } = useGames();
+  const wish = useWishlist();
+  const likes = useGameLikeStore();
+  // 회원 프로필과 같은 방식으로 센다(누가 눌렀는지 목록에서 나를 찾는다) — 두 화면의 숫자가
+  // 서로 다른 길로 계산되면 언젠가 어긋난다.
+  const hearted = useMemo(() => {
+    const myId = profile?.id;
+    if (!myId) return [];
+    return [...owned, ...wish.games].filter((g) => likes.byGame.get(g.id)?.has(myId));
+  }, [owned, wish.games, likes.byGame, profile?.id]);
+  const [openGame, setOpenGame] = useState<Game | null>(null);
+
   const [inviteCode, setInviteCode] = useState('');
   const [copied, setCopied] = useState(false);
 
@@ -183,77 +228,33 @@ export default function ProfileScreen() {
           </Pressable>
 
           <View style={styles.stats}>
-            <Stat label="게시글" value={mine.length} />
-            <Stat label="좋아요" value={likesGot} />
+            <ProfileStat label="게시글" value={mine.length} />
+            <ProfileStat label="받은 좋아요" value={likesGot} />
+            <ProfileStat label="하트한 게임" value={hearted.length} />
           </View>
         </View>
 
-        {editing ? (
-          <View style={styles.editBox}>
-            <TextInput
-              value={nickname}
-              onChangeText={setNickname}
-              placeholder="닉네임"
-              placeholderTextColor={c.textSecondary}
-              style={[styles.input, t.body, { color: c.text, backgroundColor: c.backgroundElement, borderColor: c.border }]}
-            />
-            <TextInput
-              value={bio}
-              onChangeText={setBio}
-              placeholder="한 줄 소개 (선택)"
-              placeholderTextColor={c.textSecondary}
-              style={[styles.input, t.body, { color: c.text, backgroundColor: c.backgroundElement, borderColor: c.border }]}
-            />
-            <View style={styles.rowButtons}>
-              <Pressable
-                onPress={() => setEditing(false)}
-                accessibilityRole="button"
-                style={[styles.outlineButton, styles.flex, { borderColor: c.border }]}>
-                <Text style={[t.body, { color: c.textSecondary, fontWeight: '600' }]}>취소</Text>
-              </Pressable>
-              <Pressable
-                onPress={() => void saveEdit()}
-                disabled={pending}
-                accessibilityRole="button"
-                style={[styles.button, styles.flex, { backgroundColor: c.accent, opacity: pending ? 0.4 : 1 }]}>
-                <Text style={[t.body, { color: c.onAccent, fontWeight: '700' }]}>저장</Text>
-              </Pressable>
-            </View>
-          </View>
-        ) : (
-          <View style={styles.info}>
-            <Text style={[t.subtitle, { color: c.text }]}>{profile.displayName}</Text>
-            <Text style={[t.caption, { color: c.textSecondary }]}>
-              @{profile.handle}
-              {profile.realName ? ` · ${profile.realName}` : ''}
-            </Text>
-            {!!profile.bio && <Text style={[t.body, { color: c.text }]}>{profile.bio}</Text>}
-          </View>
-        )}
+        <View style={styles.info}>
+          <Text style={[t.subtitle, { color: c.text }]}>{profile.displayName}</Text>
+          <Text style={[t.caption, { color: c.textSecondary }]}>
+            @{profile.handle}
+            {profile.realName ? ` · ${profile.realName}` : ''}
+          </Text>
+          {!!profile.bio && <Text style={[t.body, { color: c.text }]}>{profile.bio}</Text>}
+        </View>
 
         {error && <Text style={[t.caption, { color: c.danger }]}>{error}</Text>}
 
-        {/* 친구 초대 — 코드를 말로 불러 주는 대신 링크 한 줄로 끝낸다.
-            링크는 지금 열려 있는 주소에서 만든다. 집에서 8089로 쓰는 사람에게는 8089 주소가,
-            도메인으로 들어온 사람에게는 도메인 주소가 나가야 상대가 열 수 있다. */}
-        <Text style={[t.label, styles.sectionLabel, { color: c.textSecondary }]}>친구 초대</Text>
-        <Pressable
-          onPress={() => void copyInvite()}
-          accessibilityRole="button"
-          style={({ pressed }) => [
-            styles.inviteRow,
-            { borderColor: c.accent, opacity: pressed ? 0.7 : 1 },
-          ]}>
-          <Icon name="user" size={20} color={c.accent} />
-          <View style={styles.inviteText}>
-            <Text style={[t.body, { color: c.text, fontWeight: '600' }]}>
-              {copied ? '링크를 복사했어요' : '초대 링크 복사'}
-            </Text>
-            <Text style={[t.caption, { color: c.textSecondary }]} numberOfLines={1}>
-              {inviteLink || '참여 코드를 불러오는 중…'}
-            </Text>
-          </View>
-        </Pressable>
+        {/* 내 전적 — 이 앱이 제일 잘 아는 것이 여기다. */}
+        <Text style={[t.label, styles.sectionLabel, { color: c.textSecondary }]}>내 전적</Text>
+        <RecordCard record={record} self />
+        {myMember && (
+          <RecentPlays
+            plays={plays}
+            member={myMember}
+            onOpenAll={() => openHistoryOf(myMember.id)}
+          />
+        )}
 
         <Text style={[t.label, styles.sectionLabel, { color: c.textSecondary }]}>모든 메뉴</Text>
         <View style={[styles.menuList, { borderColor: c.border }]}>
@@ -295,44 +296,79 @@ export default function ProfileScreen() {
           </>
         )}
 
-        <Text style={[t.label, styles.sectionLabel, { color: c.textSecondary }]}>내 게시글</Text>
-        {mine.length === 0 ? (
+        <Text style={[t.label, styles.sectionLabel, { color: c.textSecondary }]}>
+          하트한 게임
+        </Text>
+        {hearted.length === 0 ? (
           <Text style={[t.caption, { color: c.textSecondary }]}>
-            아직 남긴 글이 없어요. 피드에서 첫 글을 써보세요.
+            아직 하트한 게임이 없어요. 게임 목록에서 하고 싶은 게임에 하트를 눌러 보세요.
           </Text>
         ) : (
-          <View style={styles.grid}>
-            {mine.map((p) => {
-              const cover = p.imagePaths[0] ? postImageUrl(p.imagePaths[0]) : null;
-              return (
-                <View
-                  key={p.id}
-                  style={[styles.cell, { backgroundColor: c.backgroundElement, borderColor: c.border }]}>
-                  {cover ? (
-                    <Image
-                      source={{ uri: cover }}
-                      style={styles.cellImage}
-                      contentFit="cover"
-                      accessibilityIgnoresInvertColors
-                    />
-                  ) : (
-                    <View style={[styles.cellImage, styles.cellTextBox, { backgroundColor: c.backgroundSelected }]}>
-                      <Text style={[t.caption, { color: c.textSecondary }]} numberOfLines={5}>
-                        {p.body}
-                      </Text>
-                    </View>
-                  )}
-                  {/* 사진 위가 아니라 아래 띠에 얹는다 — 사진 위에 올리면 밝은 사진에서 안 보인다. */}
-                  <View style={[styles.cellMeta, { borderTopColor: c.border }]}>
-                    <Icon name="heart" size={13} color={c.textSecondary} filled={p.likeCount > 0} />
-                    <Text style={[styles.cellMetaText, { color: c.text }]}>{p.likeCount}</Text>
-                    <Text style={[styles.cellMetaText, { color: c.textSecondary, flex: 1, textAlign: 'right' }]}>
-                      {timeAgo(p.createdAt)}
-                    </Text>
-                  </View>
-                </View>
-              );
-            })}
+          <GameGrid games={hearted} onOpen={setOpenGame} />
+        )}
+
+        <Text style={[t.label, styles.sectionLabel, { color: c.textSecondary }]}>내 게시글</Text>
+        <PostGrid
+          posts={mine}
+          emptyText="아직 남긴 글이 없어요. 피드에서 첫 글을 써보세요."
+          onOpen={(p) => openPost(p.id)}
+        />
+
+        {/* 친구 초대 — 코드를 말로 불러 주는 대신 링크 한 줄로 끝낸다.
+            링크는 지금 열려 있는 주소에서 만든다. 집에서 8089로 쓰는 사람에게는 8089 주소가,
+            도메인으로 들어온 사람에게는 도메인 주소가 나가야 상대가 열 수 있다. */}
+        <Text style={[t.label, styles.sectionLabel, { color: c.textSecondary }]}>친구 초대</Text>
+        <Pressable
+          onPress={() => void copyInvite()}
+          accessibilityRole="button"
+          style={({ pressed }) => [
+            styles.inviteRow,
+            { borderColor: c.accent, opacity: pressed ? 0.7 : 1 },
+          ]}>
+          <Icon name="user" size={20} color={c.accent} />
+          <View style={styles.inviteText}>
+            <Text style={[t.body, { color: c.text, fontWeight: '600' }]}>
+              {copied ? '링크를 복사했어요' : '초대 링크 복사'}
+            </Text>
+            <Text style={[t.caption, { color: c.textSecondary }]} numberOfLines={1}>
+              {inviteLink || '참여 코드를 불러오는 중…'}
+            </Text>
+          </View>
+        </Pressable>
+
+        {/* 편집 창은 '프로필 편집' 버튼 바로 위에 연다 — 버튼과 창이 멀면 눌러 놓고
+            화면 위로 되돌아가야 한다. 위쪽 프로필 카드에서 열던 것을 여기로 내렸다. */}
+        {editing && (
+          <View style={styles.editBox}>
+            <TextInput
+              value={nickname}
+              onChangeText={setNickname}
+              placeholder="닉네임"
+              placeholderTextColor={c.textSecondary}
+              style={[styles.input, t.body, { color: c.text, backgroundColor: c.backgroundElement, borderColor: c.border }]}
+            />
+            <TextInput
+              value={bio}
+              onChangeText={setBio}
+              placeholder="한 줄 소개 (선택)"
+              placeholderTextColor={c.textSecondary}
+              style={[styles.input, t.body, { color: c.text, backgroundColor: c.backgroundElement, borderColor: c.border }]}
+            />
+            <View style={styles.rowButtons}>
+              <Pressable
+                onPress={() => setEditing(false)}
+                accessibilityRole="button"
+                style={[styles.outlineButton, styles.flex, { borderColor: c.border }]}>
+                <Text style={[t.body, { color: c.textSecondary, fontWeight: '600' }]}>취소</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => void saveEdit()}
+                disabled={pending}
+                accessibilityRole="button"
+                style={[styles.button, styles.flex, { backgroundColor: c.accent, opacity: pending ? 0.4 : 1 }]}>
+                <Text style={[t.body, { color: c.onAccent, fontWeight: '700' }]}>저장</Text>
+              </Pressable>
+            </View>
           </View>
         )}
 
@@ -353,20 +389,16 @@ export default function ProfileScreen() {
           </Pressable>
         </View>
       </ScrollView>
+
+      <CenterModal visible={!!openGame} onClose={() => setOpenGame(null)}>
+        {openGame && (
+          <GameDetail game={openGame} playerCount={null} onClose={() => setOpenGame(null)} />
+        )}
+      </CenterModal>
     </View>
   );
 }
 
-function Stat({ label, value }: { label: string; value: number }) {
-  const c = useTheme();
-  const t = useType();
-  return (
-    <View style={styles.stat}>
-      <Text style={[t.title, { color: c.text }]}>{value}</Text>
-      <Text style={[t.caption, { color: c.textSecondary }]}>{label}</Text>
-    </View>
-  );
-}
 
 const styles = StyleSheet.create({
   screen: { flex: 1 },
@@ -448,22 +480,4 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   // 인스타그램식 3열 격자. 사진이 없는 글은 본문 미리보기로 채운다.
-  grid: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.two },
-  cell: {
-    width: '31.5%',
-    borderRadius: Radius.md,
-    borderWidth: StyleSheet.hairlineWidth,
-    overflow: 'hidden',
-  },
-  cellImage: { width: '100%', aspectRatio: 1 },
-  cellTextBox: { padding: Spacing.two, justifyContent: 'center' },
-  cellMeta: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.one,
-    paddingHorizontal: Spacing.two,
-    paddingVertical: Spacing.one,
-    borderTopWidth: StyleSheet.hairlineWidth,
-  },
-  cellMetaText: { ...Typography.caption, fontWeight: '600' },
 });

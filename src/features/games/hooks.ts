@@ -5,7 +5,14 @@ import { supabaseConfigError } from '@/lib/supabase';
 import { fetchPlayCounts } from '@/features/plays/queries';
 
 import type { GameInput } from './mappers';
-import { createGame, deleteGame, fetchOwnedGames, fetchWishlistGames, updateGame } from './queries';
+import {
+  createGame,
+  deleteGame,
+  fetchOwnedGames,
+  fetchWishlistGames,
+  setGameOwned,
+  updateGame,
+} from './queries';
 import { loadGameLikes, useGameLikeStore } from './likes';
 import { applyFilter, type LikeContext } from './recommend';
 import type { Game, GameFilter } from './types';
@@ -194,7 +201,23 @@ export function useEditGame() {
     [run]
   );
 
-  return { create, update, remove, pending, error };
+  /** 위시 → 소장(또는 반대). 목록 캐시도 함께 맞춘다. */
+  const setOwned = useCallback(
+    (id: string, owned: boolean) =>
+      run(
+        () => setGameOwned(id, owned),
+        (game) => {
+          if (!store.games) return;
+          const prev = store.games.find((g) => g.id === game.id);
+          const merged = { ...game, playCount: prev?.playCount ?? 0 };
+          const without = store.games.filter((g) => g.id !== game.id);
+          setStore({ games: merged.owned ? [...without, merged] : without });
+        }
+      ),
+    [run]
+  );
+
+  return { create, update, remove, setOwned, pending, error };
 }
 
 /**

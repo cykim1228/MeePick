@@ -1,14 +1,20 @@
 import { useMemo, useState } from 'react';
-import { Modal, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Image } from 'expo-image';
+import { Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 
 import { Chip } from '@/components/chip';
+import { Icon } from '@/components/icon';
+import { CollapsibleFilterSection } from '@/components/filter-section';
+import { SheetModal } from '@/components/sheet-modal';
 import { Radius, Spacing, TouchTarget, Typography } from '@/constants/theme';
+import { canPickImage, pickImages, uploadPostImage } from '@/features/community/images';
 import { useEditGame } from '@/features/games/hooks';
+import { storageImageUrl } from '@/features/games/images';
 import type { GameInput } from '@/features/games/mappers';
 import type { Game } from '@/features/games/types';
 import { useSession } from '@/features/plays/hooks';
 import { useConfirmOnce } from '@/hooks/use-confirm-once';
+import { useTouch } from '@/hooks/use-touch';
 import { useTheme } from '@/hooks/use-theme';
 
 const PLAYER_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
@@ -17,10 +23,21 @@ type Props = {
   visible: boolean;
   /** null이면 새 게임 추가, 값이 있으면 그 게임 수정 */
   game: Game | null;
-  /** 카테고리 선택지. 기존 목록에서 뽑아 넘긴다. */
+  /** 카테고리·테마·메커니즘 선택지. 기존 목록에서 뽑아 넘긴다 — 새 이름이 마구 생기면
+      필터가 1건짜리 값으로 뒤덮인다. */
   categoryOptions: string[];
+  themeOptions: string[];
+  mechanicOptions: string[];
   /** 새 게임의 '지금 집에 있음' 초기값. 위시리스트에서 추가할 때 false로 넘긴다. */
   defaultOwned?: boolean;
+  /**
+   * 위시리스트 전용 모드 — 일반 회원이 "사고 싶은 게임"을 올릴 때.
+   *
+   * '지금 집에 있음' 스위치를 감춘다. 정책이 owned=false만 허용하므로 켜 봐야 저장에서
+   * 막히는데, 막힌 뒤에야 알게 되는 것보다 아예 안 보이는 편이 낫다.
+   * 소장으로 옮기는 판단은 실제로 샀는지 아는 모임장이 한다.
+   */
+  wishOnly?: boolean;
   onClose: () => void;
   onSaved?: (game: Game) => void;
   onDeleted?: () => void;
@@ -40,6 +57,8 @@ function initialInput(game: Game | null, defaultOwned: boolean): GameInput {
     weight: game?.weight ?? null,
     categories: game?.categories ?? [],
     themes: game?.themes ?? [],
+    mechanics: game?.mechanics ?? [],
+    imagePath: game?.imagePath ?? null,
     notes: game?.notes ?? null,
     ruleVideoUrl: game?.ruleVideoUrl ?? null,
   };
@@ -49,19 +68,47 @@ export function GameForm({
   visible,
   game,
   categoryOptions,
+  themeOptions,
+  mechanicOptions,
   defaultOwned = true,
+  wishOnly = false,
   onClose,
   onSaved,
   onDeleted,
 }: Props) {
   const c = useTheme();
-  const insets = useSafeAreaInsets();
+  const touch = useTouch();
   const { create, update, remove, pending, error } = useEditGame();
   const { activePlay } = useSession();
 
   // game이 바뀌면 폼을 새로 만든다. key로 리마운트시키는 쪽이 useEffect 동기화보다 단순하다.
   const [input, setInput] = useState<GameInput>(() => initialInput(game, defaultOwned));
-  const [themesText, setThemesText] = useState(() => (game?.themes ?? []).join(', '));
+  const [themesOpen, setThemesOpen] = useState(false);
+  const [mechanicsOpen, setMechanicsOpen] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [imageError, setImageError] = useState<string | null>(null);
+
+  const toggleTag = (key: 'themes' | 'mechanics', value: string) =>
+    patch({
+      [key]: input[key].includes(value)
+        ? input[key].filter((v) => v !== value)
+        : [...input[key], value],
+    });
+
+  /** 표지 한 장. 사진과 같은 통로(NAS)로 올리고 경로만 저장한다. */
+  const pickCover = async () => {
+    setImageError(null);
+    const [file] = await pickImages(false);
+    if (!file) return;
+    setUploading(true);
+    try {
+      patch({ imagePath: await uploadPostImage(file) });
+    } catch (e) {
+      setImageError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setUploading(false);
+    }
+  };
   // 삭제 확인은 폼 안 다른 곳을 건드리면 풀린다.
   const delConfirm = useConfirmOnce<'del'>();
 
@@ -85,11 +132,7 @@ export function GameForm({
 
   const save = async () => {
     if (blocking.length) return;
-    const payload: GameInput = {
-      ...input,
-      themes: themesText.split(',').map((t) => t.trim()).filter(Boolean),
-    };
-    const saved = game ? await update(game.id, payload) : await create(payload);
+    const saved = game ? await update(game.id, input) : await create(input);
     if (saved) {
       onSaved?.(saved);
       onClose();
@@ -112,18 +155,35 @@ export function GameForm({
   };
 
   return (
-    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-      <View
-        {...delConfirm.bind}
-        style={[styles.root, { backgroundColor: c.background, paddingTop: insets.top }]}>
-        <View style={[styles.header, { borderBottomColor: c.border }]}>
-          <Text style={[styles.title, { color: c.text }]}>{game ? '게임 수정' : '게임 추가'}</Text>
-          <Pressable onPress={onClose} accessibilityRole="button" accessibilityLabel="닫기" style={styles.close}>
-            <Text style={[styles.title, { color: c.textSecondary }]}>✕</Text>
+    <SheetModal visible={visible} onClose={onClose}>
+      <View {...delConfirm.bind} style={styles.content}>
+        {/* 표지 — 없으면 회색 자리만 있고, 누르면 한 장 고른다. */}
+        {canPickImage && (
+          <Pressable
+            onPress={() => void pickCover()}
+            disabled={uploading}
+            accessibilityRole="button"
+            accessibilityLabel="대표 이미지 고르기"
+            style={[styles.coverPick, { borderColor: c.border, backgroundColor: c.backgroundElement }]}>
+            {input.imagePath ? (
+              <Image
+                source={{ uri: storageImageUrl(input.imagePath) ?? undefined }}
+                style={styles.coverImage}
+                contentFit="cover"
+                accessibilityIgnoresInvertColors
+              />
+            ) : (
+              <View style={styles.coverEmpty}>
+                <Icon name="image" size={22} color={c.textSecondary} />
+              </View>
+            )}
+            <Text style={[styles.hint, styles.coverLabel, { color: c.textSecondary }]}>
+              {uploading ? '올리는 중…' : input.imagePath ? '대표 이미지 바꾸기' : '대표 이미지 올리기'}
+            </Text>
           </Pressable>
-        </View>
+        )}
+        {imageError && <Text style={[styles.hint, { color: c.danger }]}>{imageError}</Text>}
 
-        <ScrollView contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + Spacing.six }]}>
           <Field label="제목" required>
             <Input value={input.titleKo} onChangeText={(titleKo) => patch({ titleKo })} placeholder="예: 아줄" />
           </Field>
@@ -136,14 +196,22 @@ export function GameForm({
             />
           </Field>
 
-          <View style={styles.switchRow}>
-            <Text style={[styles.label, { color: c.text }]}>지금 집에 있음</Text>
-            <Switch value={input.owned} onValueChange={(owned) => patch({ owned })} />
-          </View>
-          {!input.owned && (
+          {wishOnly ? (
             <Text style={[styles.hint, { color: c.textSecondary }]}>
-              끄면 위시리스트로 분류되어 추천 후보에서 빠집니다.
+              위시리스트에 올라갑니다. 실제로 사면 모임장이 소장 목록으로 옮겨 줍니다.
             </Text>
+          ) : (
+            <>
+              <View style={styles.switchRow}>
+                <Text style={[styles.label, { color: c.text }]}>지금 집에 있음</Text>
+                <Switch value={input.owned} onValueChange={(owned) => patch({ owned })} />
+              </View>
+              {!input.owned && (
+                <Text style={[styles.hint, { color: c.textSecondary }]}>
+                  끄면 위시리스트로 분류되어 추천 후보에서 빠집니다.
+                </Text>
+              )}
+            </>
           )}
 
           <Field label="가능 인원" required>
@@ -252,9 +320,41 @@ export function GameForm({
             </View>
           </Field>
 
-          <Field label="테마">
-            <Input value={themesText} onChangeText={setThemesText} placeholder="쉼표로 구분 (예: 동물, 카드 게임)" />
-          </Field>
+          {/* 테마·메커니즘은 기존 값에서 고른다. 자유 입력이면 '동물'과 '동물들'이 따로 생겨
+              필터가 1건짜리 값으로 지저분해진다. 옵션이 많아 기본은 접어 둔다. */}
+          <CollapsibleFilterSection
+            label="테마"
+            selectedCount={input.themes.length}
+            expanded={themesOpen}
+            onToggle={() => setThemesOpen((v) => !v)}>
+            <View style={styles.chipRow}>
+              {themeOptions.map((v) => (
+                <Chip
+                  key={v}
+                  label={v}
+                  selected={input.themes.includes(v)}
+                  onPress={() => toggleTag('themes', v)}
+                />
+              ))}
+            </View>
+          </CollapsibleFilterSection>
+
+          <CollapsibleFilterSection
+            label="메커니즘"
+            selectedCount={input.mechanics.length}
+            expanded={mechanicsOpen}
+            onToggle={() => setMechanicsOpen((v) => !v)}>
+            <View style={styles.chipRow}>
+              {mechanicOptions.map((v) => (
+                <Chip
+                  key={v}
+                  label={v}
+                  selected={input.mechanics.includes(v)}
+                  onPress={() => toggleTag('mechanics', v)}
+                />
+              ))}
+            </View>
+          </CollapsibleFilterSection>
 
           <Field label="룰 영상 (유튜브 링크)">
             <Input
@@ -283,9 +383,8 @@ export function GameForm({
             </Text>
           ))}
           {error && <Text style={[styles.hint, { color: c.danger }]}>{error}</Text>}
-        </ScrollView>
 
-        <View style={[styles.footer, { borderTopColor: c.border, paddingBottom: insets.bottom + Spacing.three }]}>
+        <View style={[styles.footer, { borderTopColor: c.border }]}>
           {game && (
             <Pressable
               onPress={destroy}
@@ -294,7 +393,11 @@ export function GameForm({
               style={[
                 styles.button,
                 styles.deleteButton,
-                { borderColor: deleteBlocked ? c.border : c.danger, opacity: deleteBlocked ? 0.5 : 1 },
+                {
+                  minHeight: touch.primary,
+                  borderColor: deleteBlocked ? c.border : c.danger,
+                  opacity: deleteBlocked ? 0.5 : 1,
+                },
               ]}>
               <Text style={[styles.buttonText, { color: deleteBlocked ? c.textSecondary : c.danger }]}>
                 {deleteBlocked ? '게임중이라 삭제 불가' : delConfirm.pendingId ? '정말 삭제할까요?' : '삭제'}
@@ -308,7 +411,11 @@ export function GameForm({
             style={[
               styles.button,
               styles.saveButton,
-              { backgroundColor: c.accent, opacity: pending || blocking.length ? 0.4 : 1 },
+              {
+                minHeight: touch.primary,
+                backgroundColor: c.accent,
+                opacity: pending || blocking.length ? 0.4 : 1,
+              },
             ]}>
             <Text style={[styles.buttonText, { color: c.onAccent }]}>
               {pending ? '저장 중…' : '저장'}
@@ -316,7 +423,7 @@ export function GameForm({
           </Pressable>
         </View>
       </View>
-    </Modal>
+    </SheetModal>
   );
 }
 
@@ -389,22 +496,18 @@ function Input({ style, ...props }: React.ComponentProps<typeof TextInput>) {
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1 },
-  header: {
+  coverPick: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: Spacing.four,
-    paddingBottom: Spacing.three,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    gap: Spacing.three,
+    padding: Spacing.two,
+    borderRadius: Radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
   },
-  title: { ...Typography.title, flex: 1 },
-  close: {
-    minWidth: TouchTarget.min,
-    minHeight: TouchTarget.min,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  content: { padding: Spacing.four, gap: Spacing.three },
+  coverImage: { width: 64, height: 64, borderRadius: Radius.sm },
+  coverEmpty: { width: 64, height: 64, alignItems: 'center', justifyContent: 'center' },
+  coverLabel: { flex: 1 },
+  content: { padding: Spacing.two, gap: Spacing.three },
   field: { gap: Spacing.two },
   label: { ...Typography.caption },
   hint: { ...Typography.caption },
@@ -416,7 +519,8 @@ const styles = StyleSheet.create({
     ...Typography.body,
   },
   multiline: { minHeight: 96, paddingTop: Spacing.two, textAlignVertical: 'top' },
-  half: { flex: 1 },
+  // minWidth: 0 이 없으면 입력칸이 내용 너비 아래로 줄지 않아 오른쪽 칸이 잘려 나간다.
+  half: { flex: 1, minWidth: 0 },
   pairRow: { flexDirection: 'row', gap: Spacing.two },
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.two },
   switchRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: Spacing.three },
@@ -433,7 +537,7 @@ const styles = StyleSheet.create({
     borderRadius: Radius.md,
     paddingHorizontal: Spacing.four,
   },
-  saveButton: { flex: 1 },
+  saveButton: { flex: 1, minWidth: 0 },
   deleteButton: { borderWidth: 1 },
   buttonText: { ...Typography.body, fontWeight: '600' },
 });

@@ -12,12 +12,16 @@ import { gameImageUrl } from '@/features/games/images';
 import { playerFit, playtimeLabel, weightLabel } from '@/features/games/recommend';
 import type { Game } from '@/features/games/types';
 import { useMyProfile } from '@/features/community/hooks';
-import { useGameLikes } from '@/features/games/likes';
+import { useOpenMember } from '@/features/community/navigation';
+import { useGameLikes, useGameLikeStore } from '@/features/games/likes';
 import { useSession } from '@/features/plays/hooks';
 import { fetchRecentPlays } from '@/features/plays/queries';
-import type { Play } from '@/features/plays/types';
+import type { Member, Play } from '@/features/plays/types';
 import { useTheme } from '@/hooks/use-theme';
 import { localDateOf } from '@/lib/dates';
+
+/** 하트 누른 사람 이름을 몇 명까지 늘어놓을지. 넘으면 '외 N명'. */
+const HEARTED_SHOWN = 6;
 
 const FIELD_LABEL: Record<string, string> = {
   player_counts: '인원',
@@ -33,11 +37,18 @@ export function GameDetail({
   playerCount,
   onClose,
   onEdit,
+  onMarkOwned,
 }: {
   game: Game;
   playerCount: number | null;
   onClose?: () => void;
   onEdit?: () => void;
+  /**
+   * 위시리스트에서만, 모임장에게만 — "샀다"를 한 번에 표시한다.
+   * 수정 화면에서 스위치를 찾아 켜는 것과 결과는 같지만, 이 동작은 자주 일어나므로
+   * 네 단계를 하나로 줄인다.
+   */
+  onMarkOwned?: () => void;
 }) {
   const c = useTheme();
   const session = useSession();
@@ -46,6 +57,27 @@ export function GameDetail({
   const isMember = useMyProfile().isMember;
   const liked = likes.mine(game.id);
   const likeCount = likes.count(game.id);
+  const likeStore = useGameLikeStore();
+  const openMember = useOpenMember();
+
+  /**
+   * 사람을 누르면 **창을 먼저 닫고** 프로필로 간다. 이 상세는 늘 팝업 안에 뜨는데,
+   * 탭 화면은 살아 있어서 창을 연 채 옮기면 새 화면 위에 창이 그대로 남는다.
+   */
+  const openPerson = (member: Member) => {
+    onClose?.();
+    openMember(member);
+  };
+
+  /**
+   * 이 게임에 하트를 누른 사람. "이거 하고 싶은 사람 누구야"가 모임에서 실제로 나오는 질문이다.
+   * 회원에게만 보여 준다 — 누가 무엇을 좋아하는지는 모임 안의 이야기다.
+   */
+  const heartedBy = useMemo(() => {
+    const ids = likeStore.byGame.get(game.id);
+    if (!isMember || !ids) return [];
+    return session.members.filter((m) => m.profileId !== null && ids.has(m.profileId));
+  }, [isMember, likeStore.byGame, game.id, session.members]);
 
   const insets = useSafeAreaInsets();
   const [sheetOpen, setSheetOpen] = useState(false);
@@ -111,7 +143,11 @@ export function GameDetail({
     const ranking = [...wins.entries()]
       .sort((a, b) => b[1] - a[1])
       .slice(0, 3)
-      .map(([id, n]) => ({ name: name(id), wins: n }));
+      .map(([id, n]) => ({
+        name: name(id),
+        member: session.members.find((m) => m.id === id) ?? null,
+        wins: n,
+      }));
     return {
       plays: gamePlays.length,
       rounds,
@@ -168,6 +204,24 @@ export function GameDetail({
             </Pressable>
           )}
         </View>
+
+        {heartedBy.length > 0 && (
+          <Text style={[styles.caption, { color: c.textSecondary }]}>
+            {'하트 누른 사람 '}
+            {heartedBy.slice(0, HEARTED_SHOWN).map((m, i) => (
+              <Text key={m.id}>
+                {i > 0 ? ', ' : ''}
+                <Text
+                  onPress={() => openPerson(m)}
+                  accessibilityRole="link"
+                  style={[styles.personLink, { color: c.text }]}>
+                  {m.name}
+                </Text>
+              </Text>
+            ))}
+            {heartedBy.length > HEARTED_SHOWN ? ` 외 ${heartedBy.length - HEARTED_SHOWN}명` : ''}
+          </Text>
+        )}
 
         {imageUrl && (
           <Image
@@ -278,11 +332,17 @@ export function GameDetail({
             {record.ranking.length > 0 && (
               <View style={styles.rankRow}>
                 {record.ranking.map((r, i) => (
-                  <Badge
-                    key={r.name}
-                    label={`${i === 0 ? '🏆 ' : ''}${r.name} ${r.wins}승`}
-                    color={i === 0 ? c.badgeBest : c.textSecondary}
-                  />
+                  <Pressable
+                    key={r.member?.id ?? r.name}
+                    onPress={() => r.member && openPerson(r.member)}
+                    disabled={!r.member}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${r.name} 프로필`}>
+                    <Badge
+                      label={`${i === 0 ? '🏆 ' : ''}${r.name} ${r.wins}승`}
+                      color={i === 0 ? c.badgeBest : c.textSecondary}
+                    />
+                  </Pressable>
                 ))}
               </View>
             )}
@@ -366,6 +426,15 @@ export function GameDetail({
             accessibilityRole="button"
             style={[styles.actionButton, styles.editButton, { borderColor: c.border }]}>
             <Text style={[styles.buttonText, { color: c.text }]}>수정</Text>
+          </Pressable>
+        )}
+
+        {onMarkOwned && (
+          <Pressable
+            onPress={onMarkOwned}
+            accessibilityRole="button"
+            style={[styles.actionButton, styles.primaryButton, { backgroundColor: c.accent }]}>
+            <Text style={[styles.buttonText, { color: c.onAccent }]}>샀어요 · 소장으로</Text>
           </Pressable>
         )}
 
@@ -520,6 +589,7 @@ const styles = StyleSheet.create({
   stat: { alignItems: 'flex-start', gap: 2 },
   statValue: { ...Typography.subtitle, fontWeight: '700' },
   rankRow: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.one },
+  personLink: { fontWeight: '700' },
   likeButton: {
     flexDirection: 'row',
     alignItems: 'center',

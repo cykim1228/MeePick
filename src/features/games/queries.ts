@@ -85,6 +85,24 @@ export async function updateGame(id: string, input: GameInput): Promise<Game> {
 }
 
 /** 게임 삭제. */
+/**
+ * 소장 여부만 바꾼다. 반환: Game (갱신된 행)
+ *
+ * 폼을 통째로 저장하지 않는 이유: toGameRow가 is_estimated를 false로 되돌린다.
+ * "샀다"는 표시는 추정값을 사람이 확인했다는 뜻이 아니므로, 그 배지까지 지우면 거짓이 된다.
+ */
+export async function setGameOwned(id: string, owned: boolean): Promise<Game> {
+  await requireAuth();
+  const { data, error } = await supabase
+    .from('games')
+    .update({ owned })
+    .eq('id', id)
+    .select('*')
+    .single();
+  if (error) throw new Error(error.message);
+  return toGame(data as GameRow);
+}
+
 export async function deleteGame(id: string): Promise<void> {
   await requireAuth();
   const { error } = await supabase.from('games').delete().eq('id', id);

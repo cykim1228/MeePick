@@ -14,11 +14,17 @@ import {
 } from 'react-native';
 
 import { Avatar } from '@/components/avatar';
+import { CenterModal } from '@/components/center-modal';
+import { GameDetail } from '@/components/game-detail';
 import { Icon } from '@/components/icon';
+import { SheetModal } from '@/components/sheet-modal';
+import { EmptyView, LoadingView } from '@/components/state-views';
 import { Radius, Shadow, Spacing, TouchTarget, Typography } from '@/constants/theme';
 import { useComments } from '@/features/community/hooks';
 import { postImageUrl } from '@/features/community/images';
+import { openMeetup, useOpenProfile } from '@/features/community/navigation';
 import type { Comment, Post, Profile } from '@/features/community/types';
+import { useGame, useWishlist } from '@/features/games/hooks';
 import { storageImageUrl } from '@/features/games/images';
 import { useBreakpoint } from '@/hooks/use-breakpoint';
 import { useMenuToggle } from '@/hooks/use-confirm-once';
@@ -47,22 +53,28 @@ const MAX_RATIO = 1.91; // 와이드 가로
 export function PostCard({
   post,
   me,
+  commentsOpen = false,
   onLike,
   onEdit,
   onDelete,
 }: {
   post: Post;
   me: Profile | null;
+  /** 댓글을 펼친 채로 시작한다 — 글 하나만 여는 화면에서 쓴다. */
+  commentsOpen?: boolean;
   onLike: () => void;
   onEdit: (body: string) => Promise<boolean>;
   onDelete: () => void;
 }) {
   const c = useTheme();
   const t = useType();
+  const openProfile = useOpenProfile();
   // 폰에서는 카드 테두리를 없애고 화면 끝까지 쓴다 — 인스타그램이 그렇듯,
   // 좁은 폭에서 카드 여백은 사진을 작게 만들 뿐이다. 태블릿·데스크탑은 카드가 낫다.
   const phone = useBreakpoint() === 'compact';
-  const [showComments, setShowComments] = useState(false);
+  const [showComments, setShowComments] = useState(commentsOpen);
+  const [likersOpen, setLikersOpen] = useState(false);
+  const [gameOpen, setGameOpen] = useState(false);
   // 메뉴는 카드 안 다른 곳을 건드리면 닫힌다 — 열린 채 남으면 글 내용을 가린다.
   const menu = useMenuToggle<'post'>();
   const [editing, setEditing] = useState<string | null>(null);
@@ -92,15 +104,38 @@ export function PostCard({
           : [Shadow.card, { backgroundColor: c.backgroundElement, borderColor: c.border, borderWidth: StyleSheet.hairlineWidth, borderRadius: Radius.lg }],
       ]}>
       <View style={styles.header}>
-        <Avatar profile={post.author} size={40} />
+        {/* 사진과 이름을 한 덩어리로 누른다 — 둘 중 하나만 되면 반쯤 누른 사람은 헷갈린다. */}
+        <Pressable
+          onPress={() => openProfile(post.author.id)}
+          accessibilityRole="button"
+          accessibilityLabel={`${post.author.displayName} 프로필`}
+          style={styles.authorLink}>
+          <Avatar profile={post.author} size={40} />
+        </Pressable>
         <View style={styles.headerText}>
-          <Text style={[styles.name, t.body, styles.bold, { color: c.text }]} numberOfLines={1}>
-            {post.author.displayName}
-          </Text>
+          <Pressable
+            onPress={() => openProfile(post.author.id)}
+            accessibilityRole="button"
+            style={styles.nameLink}>
+            <Text style={[styles.name, t.body, styles.bold, { color: c.text }]} numberOfLines={1}>
+              {post.author.displayName}
+            </Text>
+          </Pressable>
           {/* 인스타그램의 '위치' 자리에 모임 이름을 둔다 — 이 글이 어느 모임의 기록인지가
               작성자 다음으로 궁금한 정보다. */}
           <Text style={[t.caption, { color: c.textSecondary }]} numberOfLines={1}>
-            {post.meetupTitle ? `${post.meetupTitle} · ` : ''}
+            {/* 모임 이름을 누르면 그 모임 페이지 — 같은 날 올라온 사진과 그날 한 게임이 모여 있다. */}
+            {post.meetupTitle && post.meetupId ? (
+              <Text
+                onPress={() => post.meetupId && openMeetup(post.meetupId)}
+                accessibilityRole="link"
+                style={[styles.bold, { color: c.text }]}>
+                {post.meetupTitle}
+              </Text>
+            ) : (
+              post.meetupTitle
+            )}
+            {post.meetupTitle ? ' · ' : ''}
             {timeAgo(post.createdAt)}
             {edited ? ' · 수정됨' : ''}
           </Text>
@@ -154,8 +189,19 @@ export function PostCard({
         <Carousel paths={post.imagePaths} onOpen={(p) => setViewer(p)} />
       )}
 
+      {/* 게임 태그는 누르면 그 게임 상세가 뜬다 — 알약 모양이라 누를 수 있어 보이는데
+          아무 일도 없으면 고장으로 읽힌다. */}
       {post.gameTitle && (
-        <View style={[styles.gameTag, { borderColor: c.border, backgroundColor: c.background }]}>
+        <Pressable
+          onPress={() => post.gameId && setGameOpen(true)}
+          disabled={!post.gameId}
+          accessibilityRole="button"
+          accessibilityLabel={`${post.gameTitle} 게임 보기`}
+          style={({ pressed }) => [
+            styles.gameTag,
+            { borderColor: c.border, backgroundColor: c.background },
+            pressed && styles.pressed,
+          ]}>
           {post.gameImagePath ? (
             <Image
               source={{ uri: storageImageUrl(post.gameImagePath) ?? '' }}
@@ -171,7 +217,8 @@ export function PostCard({
           <Text style={[styles.gameName, { color: c.text }]} numberOfLines={1}>
             {post.gameTitle}
           </Text>
-        </View>
+          <Icon name="chevronRight" size={14} color={c.textSecondary} />
+        </Pressable>
       )}
 
       <View style={styles.actions}>
@@ -199,10 +246,17 @@ export function PostCard({
         </Pressable>
       </View>
 
+      {/* '민수님 외 2명' — 그 2명이 누구인지는 눌러서 본다. */}
       {post.likeCount > 0 && (
-        <Text style={[styles.likeLine, t.caption, styles.bold, { color: c.text }]}>
-          {likeSummary(post, me)}
-        </Text>
+        <Pressable
+          onPress={() => post.likers.length > 0 && setLikersOpen(true)}
+          accessibilityRole="button"
+          accessibilityLabel="좋아요 누른 사람 보기"
+          style={styles.likeLink}>
+          <Text style={[styles.likeLine, t.caption, styles.bold, { color: c.text }]}>
+            {likeSummary(post, me)}
+          </Text>
+        </Pressable>
       )}
 
       {editing !== null ? (
@@ -267,7 +321,77 @@ export function PostCard({
           )}
         </Pressable>
       </Modal>
+
+      {likersOpen && <LikersSheet post={post} me={me} onClose={() => setLikersOpen(false)} />}
+      {gameOpen && post.gameId && (
+        <PostGameModal gameId={post.gameId} onClose={() => setGameOpen(false)} />
+      )}
     </View>
+  );
+}
+
+/**
+ * 좋아요 누른 사람들.
+ *
+ * 사람을 누르면 창을 **먼저 닫고** 그 사람 프로필로 간다. 창을 연 채 화면을 옮기면
+ * 탭 화면이 살아 있는 탓에 창이 새 화면 위에 그대로 떠 있다.
+ */
+function LikersSheet({ post, me, onClose }: { post: Post; me: Profile | null; onClose: () => void }) {
+  const c = useTheme();
+  const t = useType();
+  const openProfile = useOpenProfile();
+
+  return (
+    <SheetModal visible onClose={onClose}>
+      <Text style={[t.label, { color: c.textSecondary }]}>좋아요 {post.likers.length}명</Text>
+      <View>
+        {post.likers.map((p) => (
+          <Pressable
+            key={p.id}
+            onPress={() => {
+              onClose();
+              openProfile(p.id);
+            }}
+            accessibilityRole="button"
+            accessibilityLabel={`${p.displayName} 프로필`}
+            style={({ pressed }) => [
+              styles.likerRow,
+              { borderBottomColor: c.border },
+              pressed && styles.pressed,
+            ]}>
+            <Avatar profile={p} size={36} />
+            <Text style={[t.body, styles.bold, styles.likerName, { color: c.text }]} numberOfLines={1}>
+              {p.displayName}
+              {p.id === me?.id ? ' (나)' : ''}
+            </Text>
+            <Icon name="chevronRight" size={16} color={c.textSecondary} />
+          </Pressable>
+        ))}
+      </View>
+    </SheetModal>
+  );
+}
+
+/**
+ * 글에 달린 게임의 상세. 창이 열릴 때만 만든다 — 피드의 카드마다 게임 목록을 구독하면
+ * 글 100개가 각자 목록 변화에 다시 그려진다.
+ * 소장 목록에 없으면 위시리스트에서 찾는다(사고 싶은 게임 이야기도 글이 된다).
+ */
+function PostGameModal({ gameId, onClose }: { gameId: string; onClose: () => void }) {
+  const owned = useGame(gameId);
+  const wish = useWishlist();
+  const game = owned.game ?? wish.games.find((g) => g.id === gameId) ?? null;
+
+  return (
+    <CenterModal visible onClose={onClose}>
+      {game ? (
+        <GameDetail game={game} playerCount={null} onClose={onClose} />
+      ) : owned.loading || wish.loading ? (
+        <LoadingView />
+      ) : (
+        <EmptyView title="게임을 찾을 수 없어요" hint="목록에서 지워진 게임이에요." />
+      )}
+    </CenterModal>
   );
 }
 
@@ -369,6 +493,7 @@ function Carousel({ paths, onOpen }: { paths: string[]; onOpen: (path: string) =
 }
 
 function CommentList({ postId, me }: { postId: string; me: Profile | null }) {
+  const openProfile = useOpenProfile();
   const c = useTheme();
   const t = useType();
   const { comments, error, pending, add, remove } = useComments(postId);
@@ -383,10 +508,17 @@ function CommentList({ postId, me }: { postId: string; me: Profile | null }) {
     <View style={styles.comments}>
       {comments.map((cm: Comment) => (
         <View key={cm.id} style={styles.commentRow}>
-          <Avatar profile={cm.author} size={28} />
+          <Pressable
+            onPress={() => openProfile(cm.author.id)}
+            accessibilityRole="button"
+            accessibilityLabel={`${cm.author.displayName} 프로필`}>
+            <Avatar profile={cm.author} size={28} />
+          </Pressable>
           <View style={styles.commentBody}>
             <Text style={[t.body, { color: c.text }]}>
-              <Text style={styles.commentAuthor}>{cm.author.displayName} </Text>
+              <Text style={styles.commentAuthor} onPress={() => openProfile(cm.author.id)}>
+                {cm.author.displayName}{' '}
+              </Text>
               {cm.body}
             </Text>
             <Text style={[t.caption, { color: c.textSecondary }]}>{timeAgo(cm.createdAt)}</Text>
@@ -448,6 +580,9 @@ const styles = StyleSheet.create({
     // 절대배치 자식에만 zIndex를 줘도, 부모가 같은 층이면 뒤에 그려진 사진이 덮는다.
     zIndex: 20,
   },
+  authorLink: { borderRadius: Radius.full },
+  // 이름 글자만 누르게 한다 — 줄 전체가 눌리면 이름 옆 빈 곳을 스쳐도 프로필로 넘어간다.
+  nameLink: { alignSelf: 'flex-start', maxWidth: '100%' },
   headerText: { flex: 1, gap: 2 },
   name: { ...Typography.body, fontWeight: '700' },
   caption: { ...Typography.caption },
@@ -511,6 +646,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.three,
     paddingTop: Spacing.half,
   },
+  // 문구 폭만큼만 눌린다 — 줄 전체가 눌리면 본문을 읽으려고 스친 손가락에 창이 뜬다.
+  likeLink: { alignSelf: 'flex-start' },
+  likerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.three,
+    minHeight: TouchTarget.primary,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  likerName: { flex: 1, minWidth: 0 },
+  pressed: { opacity: 0.6 },
   gameTag: {
     flexDirection: 'row',
     alignItems: 'center',

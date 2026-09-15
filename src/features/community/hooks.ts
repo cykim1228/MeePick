@@ -3,6 +3,9 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import { loadGameLikes, resetGameLikes } from '@/features/games/likes';
 import { supabase } from '@/lib/supabase';
 
+import { activityAt, useActivityAt } from './activity';
+import { createListStore, useListStore } from './list-store';
+
 import {
   addComment,
   createMeetup,
@@ -147,70 +150,78 @@ export function useMyProfile() {
     isMember: s.profile !== null,
     reload: reloadProfile,
     /** 프로필 수정 후 캐시까지 갱신한다. 화면이 따로 새로고침할 필요가 없다. */
-    save: async (input: { displayName?: string; bio?: string | null; avatarPath?: string | null }) => {
+    save: async (input: {
+      displayName?: string;
+      bio?: string | null;
+      avatarPath?: string | null;
+      onboarded?: boolean;
+    }) => {
       applyProfile(await updateProfile(input));
     },
   };
 }
 
-/** 조회 → 상태 반영을 한 곳에 모은다. 화면마다 같은 try/catch를 반복하지 않는다. */
-function useResource<T>(load: () => Promise<T>, enabled: boolean) {
-  const [data, setData] = useState<T | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [pending, setPending] = useState(false);
+/**
+ * 피드와 일정은 여러 화면이 함께 보는 목록이다(list-store.ts). 각자 따라가는 활동 시각이
+ * 다르다 — 피드는 글·댓글, 일정은 일정이 새로 생긴 시각.
+ */
+const feedStore = createListStore<Post>(() => activityAt('feed'), () => fetchPosts());
+const meetupStore = createListStore<Meetup>(() => activityAt('meetups'), () => fetchMeetups());
 
-  const reload = useCallback(async () => {
-    if (!enabled) return;
-    try {
-      setData(await load());
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-    // load는 화면에서 매 렌더 새로 만들어지므로 의존성에 넣으면 무한 루프가 된다.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled]);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void reload();
-  }, [reload]);
-
-  /** 쓰기 동작을 감싼다 — 에러를 화면에 남기고 성공하면 목록을 다시 받는다. */
-  const run = useCallback(
-    async (fn: () => Promise<unknown>) => {
-      setPending(true);
-      setError(null);
-      try {
-        await fn();
-        await reload();
-        return true;
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-        return false;
-      } finally {
-        setPending(false);
-      }
-    },
-    [reload]
-  );
-
-  return { data, error, pending, reload, run, setError };
-}
+/** 좋아요를 누르는 중인 글. 빠르게 두 번 누르면 같은 요청이 겹쳐 서버에서 충돌한다. */
+const liking = new Set<string>();
 
 export function useFeed(enabled: boolean) {
-  const r = useResource<Post[]>(() => fetchPosts(), enabled);
+  const s = useListStore(feedStore, useActivityAt('feed'), enabled);
 
   return {
-    posts: r.data ?? [],
-    loading: r.data === null && !r.error,
-    error: r.error,
-    pending: r.pending,
-    reload: r.reload,
-    write: (input: PostInput) => r.run(() => createPost(input)),
-    edit: (id: string, body: string) => r.run(() => updatePost(id, body)),
-    remove: (id: string) => r.run(() => deletePost(id)),
-    like: (post: Post) => r.run(() => toggleLike(post.id, post.likedByMe)),
+    posts: enabled ? (s.data ?? []) : [],
+    loading: enabled && s.data === null && !s.error,
+    error: enabled ? s.error : null,
+    pending: s.pending,
+    reload: feedStore.reload,
+    write: (input: PostInput) => feedStore.run(() => createPost(input)),
+    edit: (id: string, body: string) => feedStore.run(() => updatePost(id, body)),
+    remove: (id: string) => feedStore.run(() => deletePost(id)),
+    /**
+     * 좋아요는 누르는 즉시 바꿔 보여 준다 — 목록 전체를 다시 받는 동안 하트가 안 채워지면
+     * "안 눌렸나" 싶어 한 번 더 누르게 된다. 실패하면 서버 상태로 되돌린다.
+     */
+    like: async (post: Post) => {
+      if (liking.has(post.id)) return false;
+      // 넘겨받은 글은 한 박자 늦은 렌더의 것일 수 있다. 지금 상태를 스토어에서 읽는다.
+      const current = feedStore.snapshot().data?.find((p) => p.id === post.id) ?? post;
+      const liked = current.likedByMe;
+      const me = profileStore.profile;
+      liking.add(post.id);
+      feedStore.mutate((list) =>
+        list.map((p) =>
+          p.id !== post.id
+            ? p
+            : {
+                ...p,
+                likedByMe: !liked,
+                likeCount: Math.max(0, p.likeCount + (liked ? -1 : 1)),
+                likers: liked
+                  ? p.likers.filter((l) => l.id !== me?.id)
+                  : me
+                    ? [...p.likers, me]
+                    : p.likers,
+              }
+        )
+      );
+      try {
+        await toggleLike(post.id, liked);
+        return true;
+      } catch (e) {
+        // 되돌린 뒤에 문구를 적는다 — 다시 받기가 성공하면 오류를 지우기 때문이다.
+        await feedStore.reload();
+        feedStore.setError(e instanceof Error ? e.message : String(e));
+        return false;
+      } finally {
+        liking.delete(post.id);
+      }
+    },
   };
 }
 
@@ -235,11 +246,22 @@ export function useComments(postId: string | null) {
     void reload();
   }, [reload]);
 
-  const run = async (fn: () => Promise<unknown>) => {
+  /**
+   * 댓글을 달거나 지우면 글 카드의 '댓글 N개'도 함께 맞춘다. 피드 목록은 따로 받아 둔 것이라
+   * 손대지 않으면 방금 단 댓글이 숫자에 안 잡힌다.
+   */
+  const run = async (fn: () => Promise<unknown>, delta: number) => {
     setPending(true);
     setError(null);
     try {
       await fn();
+      if (postId) {
+        feedStore.mutate((list) =>
+          list.map((p) =>
+            p.id === postId ? { ...p, commentCount: Math.max(0, p.commentCount + delta) } : p
+          )
+        );
+      }
       await reload();
       return true;
     } catch (e) {
@@ -254,23 +276,24 @@ export function useComments(postId: string | null) {
     comments,
     error,
     pending,
-    add: (body: string) => run(() => addComment(postId as string, body)),
-    remove: (id: string) => run(() => deleteComment(id)),
+    add: (body: string) => run(() => addComment(postId as string, body), 1),
+    remove: (id: string) => run(() => deleteComment(id), -1),
   };
 }
 
 export function useMeetups(enabled: boolean) {
-  const r = useResource<Meetup[]>(() => fetchMeetups(), enabled);
+  const s = useListStore(meetupStore, useActivityAt('meetups'), enabled);
 
   return {
-    meetups: r.data ?? [],
-    loading: r.data === null && !r.error,
-    error: r.error,
-    pending: r.pending,
-    reload: r.reload,
-    create: (input: MeetupInput) => r.run(() => createMeetup(input)),
-    edit: (id: string, input: MeetupInput) => r.run(() => updateMeetup(id, input)),
-    remove: (id: string) => r.run(() => deleteMeetup(id)),
-    rsvp: (meetupId: string, status: RsvpStatus) => r.run(() => setRsvp(meetupId, status)),
+    meetups: enabled ? (s.data ?? []) : [],
+    loading: enabled && s.data === null && !s.error,
+    error: enabled ? s.error : null,
+    pending: s.pending,
+    reload: meetupStore.reload,
+    create: (input: MeetupInput) => meetupStore.run(() => createMeetup(input)),
+    edit: (id: string, input: MeetupInput) => meetupStore.run(() => updateMeetup(id, input)),
+    remove: (id: string) => meetupStore.run(() => deleteMeetup(id)),
+    rsvp: (meetupId: string, status: RsvpStatus) =>
+      meetupStore.run(() => setRsvp(meetupId, status)),
   };
 }

@@ -1,4 +1,5 @@
 import { Image } from 'expo-image';
+import { router, useLocalSearchParams } from 'expo-router';
 import { useMemo, useState } from 'react';
 import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -6,21 +7,21 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ChipRow } from '@/components/chip-row';
 import { PlayEditor } from '@/components/play-editor';
 import { roundLabel } from '@/components/play-sheet';
+import { ScreenTitle } from '@/components/screen-title';
 import { SearchBar } from '@/components/search-bar';
 import { storageImageUrl } from '@/features/games/images';
 import { EmptyView, ErrorView, LoadingView } from '@/components/state-views';
 import { Radius, Spacing, TouchTarget, Typography } from '@/constants/theme';
+import { useOpenMember } from '@/features/community/navigation';
 import { usePlayHistory, useSession } from '@/features/plays/hooks';
 import type { PlayWithGame } from '@/features/plays/queries';
 import { useConfirmOnce } from '@/hooks/use-confirm-once';
 import { useTheme } from '@/hooks/use-theme';
-import { useType } from '@/hooks/use-type';
 import { localDateOf, localToday } from '@/lib/dates';
 
 /** 플레이 기록 — 날짜별로 묶어 최근부터. */
 export default function HistoryScreen() {
   const c = useTheme();
-  const t = useType();
   const insets = useSafeAreaInsets();
   const { members } = useSession();
   const { plays, loading, error, reload, remove, applyUpdate, pending } = usePlayHistory();
@@ -29,7 +30,16 @@ export default function HistoryScreen() {
   const confirm = useConfirmOnce<string>();
   const [editing, setEditing] = useState<PlayWithGame | null>(null);
   const [query, setQuery] = useState('');
-  const [memberId, setMemberId] = useState<string | null>(null);
+  const openMember = useOpenMember();
+
+  /**
+   * 사람 조건은 주소(`?member=`)에 둔다. 프로필의 '기록 모두 보기'가 그 사람으로 걸러 둔 채
+   * 이 화면을 열 수 있어야 하고, 탭 화면은 살아 있어서 화면 안 상태로 두면 두 번째로
+   * 들어올 때 걸러지지 않는다.
+   */
+  const params = useLocalSearchParams<{ member?: string }>();
+  const memberId = typeof params.member === 'string' && params.member ? params.member : null;
+  const setMemberId = (id: string | null) => router.setParams({ member: id ?? undefined });
 
   /**
    * 기록 찾기 — 게임 이름과 메모, 그리고 함께한 사람으로 좁힌다.
@@ -78,11 +88,24 @@ export default function HistoryScreen() {
     return d === localToday() ? `${d} · 오늘` : d;
   };
 
-  const memberNames = (p: PlayWithGame) =>
+  const selectedMember = memberId ? (members.find((m) => m.id === memberId) ?? null) : null;
+
+  /** 함께한 사람 — 이름을 누르면 그 사람 프로필로 간다(손님은 전적만 있는 프로필). */
+  const memberLinks = (p: PlayWithGame) =>
     p.memberIds
-      .map((id) => members.find((m) => m.id === id)?.name)
-      .filter(Boolean)
-      .join(' · ');
+      .map((id) => members.find((m) => m.id === id))
+      .filter((m): m is NonNullable<typeof m> => Boolean(m))
+      .map((m, i) => (
+        <Text key={m.id}>
+          {i > 0 ? ' · ' : ''}
+          <Text
+            onPress={() => openMember(m)}
+            accessibilityRole="link"
+            style={[styles.nameLink, { color: c.text }]}>
+            {m.name}
+          </Text>
+        </Text>
+      ));
 
   return (
     <View
@@ -94,14 +117,16 @@ export default function HistoryScreen() {
         contentContainerStyle={[styles.listContent, { paddingBottom: insets.bottom + Spacing.six }]}
         ListHeaderComponent={
           <View style={styles.header}>
-            <Text style={[styles.h1, t.display, { color: c.text }]}>기록</Text>
-            <Text style={[styles.sub, { color: c.textSecondary }]}>
-              {filtering
-                ? `${shown.length}판 / 전체 ${plays.length}판`
-                : plays.length
-                  ? `지금까지 ${plays.length}판`
-                  : ' '}
-            </Text>
+            <ScreenTitle
+              title="기록"
+              subtitle={
+                filtering
+                  ? `${shown.length}판 / 전체 ${plays.length}판`
+                  : plays.length
+                    ? `지금까지 ${plays.length}판`
+                    : undefined
+              }
+            />
             {plays.length > 0 && (
               <View style={styles.filters}>
                 <SearchBar
@@ -116,9 +141,20 @@ export default function HistoryScreen() {
                     key: m.id,
                     label: m.name,
                     selected: memberId === m.id,
-                    onPress: () => setMemberId((cur) => (cur === m.id ? null : m.id)),
+                    onPress: () => setMemberId(memberId === m.id ? null : m.id),
                   }))}
                 />
+                {/* 한 사람으로 좁혔으면 그 사람 프로필로 가는 길을 바로 옆에 둔다. */}
+                {selectedMember && (
+                  <Pressable
+                    onPress={() => openMember(selectedMember)}
+                    accessibilityRole="button"
+                    style={styles.profileLink}>
+                    <Text style={[styles.caption, styles.bold, { color: c.accent }]}>
+                      {selectedMember.name} 프로필 보기 ›
+                    </Text>
+                  </Pressable>
+                )}
               </View>
             )}
           </View>
@@ -165,7 +201,7 @@ export default function HistoryScreen() {
                       {item.gameTitle}
                     </Text>
                     <Text style={[styles.caption, { color: c.textSecondary }]} numberOfLines={1}>
-                      {memberNames(item)}
+                      {memberLinks(item)}
                       {durationMin >= 1 && durationMin <= 720 ? ` · ${durationMin}분` : ''}
                     </Text>
                   </View>
@@ -295,6 +331,9 @@ const styles = StyleSheet.create({
   title: { ...Typography.subtitle },
   body: { ...Typography.body },
   caption: { ...Typography.caption },
+  bold: { fontWeight: '700' },
+  nameLink: { fontWeight: '600' },
+  profileLink: { minHeight: TouchTarget.min, justifyContent: 'center', alignSelf: 'flex-start' },
   delete: {
     minWidth: TouchTarget.min,
     minHeight: TouchTarget.min,

@@ -2,14 +2,12 @@ import { Image } from 'expo-image';
 import { useEffect, useMemo, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { Avatar } from '@/components/avatar';
 import { Icon, type IconName } from '@/components/icon';
 import { Radius, Spacing, TouchTarget, Typography } from '@/constants/theme';
 import { clearPostDraft, usePostDraft } from '@/features/community/draft';
 import { useMeetups } from '@/features/community/hooks';
 import { canPickImage, pickImages, postImageUrl, uploadPostImage } from '@/features/community/images';
 import type { PostInput } from '@/features/community/queries';
-import type { Profile } from '@/features/community/types';
 import { useGames } from '@/features/games/hooks';
 import { gameImageUrl } from '@/features/games/images';
 import type { Game } from '@/features/games/types';
@@ -25,11 +23,9 @@ import { formatMeetupTime } from '@/lib/dates';
  * 사진 여러 장일 때 버튼을 누른 뒤 몇 초씩 멈춘 것처럼 보인다.
  */
 export function PostComposer({
-  me,
   pending,
   onSubmit,
 }: {
-  me: Profile;
   pending: boolean;
   onSubmit: (input: PostInput) => Promise<boolean>;
 }) {
@@ -91,18 +87,21 @@ export function PostComposer({
   };
 
   return (
-    <View style={[styles.card, { backgroundColor: c.backgroundElement, borderColor: c.border }]}>
-      <View style={styles.row}>
-        <Avatar profile={me} size={38} />
-        <TextInput
-          value={body}
-          onChangeText={setBody}
-          placeholder="모임에서 있었던 일을 남겨보세요"
-          placeholderTextColor={c.textSecondary}
-          multiline
-          style={[styles.input, { color: c.text }]}
-        />
-      </View>
+    /* 팝업이 이미 카드다 — 여기서 테두리를 또 두르면 액자 안의 액자가 된다.
+       내 얼굴도 넣지 않는다. 내가 쓰는 글인 건 이미 아는 사실이고, 그 자리만큼
+       본문이 좁아진다. */
+    <View style={styles.card}>
+      <TextInput
+        value={body}
+        onChangeText={setBody}
+        placeholder="모임에서 있었던 일을 남겨보세요"
+        placeholderTextColor={c.textSecondary}
+        multiline
+        style={[
+          styles.input,
+          { color: c.text, backgroundColor: c.backgroundElement, borderColor: c.border },
+        ]}
+      />
 
       {paths.length > 0 && (
         <View style={styles.thumbs}>
@@ -374,14 +373,16 @@ function MeetupPicker({ onPick }: { onPick: (m: { id: string; title: string }) =
 }
 
 const styles = StyleSheet.create({
-  card: {
-    borderRadius: Radius.lg,
-    borderWidth: StyleSheet.hairlineWidth,
+  card: { gap: Spacing.two },
+  // 네 줄쯤 쓸 자리를 처음부터 준다 — 한 줄짜리 칸은 "한 줄만 쓰라"는 신호가 된다.
+  input: {
+    minHeight: 108,
+    textAlignVertical: 'top',
     padding: Spacing.three,
-    gap: Spacing.two,
+    borderRadius: Radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    ...Typography.body,
   },
-  row: { flexDirection: 'row', alignItems: 'flex-start', gap: Spacing.two },
-  input: { flex: 1, minHeight: TouchTarget.min, paddingTop: Spacing.two, ...Typography.body },
   thumbs: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.two },
   thumb: { width: 64, height: 64, borderRadius: Radius.sm },
   thumbX: {
@@ -413,13 +414,14 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: Spacing.two,
   },
+  // 도구 버튼들과 같은 줄에 있는 작은 알약이다. 주 버튼이라고 키우면 그 줄만 붕 뜬다.
   submit: {
-    minHeight: TouchTarget.min,
+    minHeight: 34,
     justifyContent: 'center',
-    paddingHorizontal: Spacing.four,
+    paddingHorizontal: Spacing.three,
     borderRadius: Radius.full,
   },
-  submitText: { ...Typography.body, fontWeight: '700' },
+  submitText: { ...Typography.caption, fontWeight: '700' },
   caption: { ...Typography.caption },
   body: { ...Typography.body },
 

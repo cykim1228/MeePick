@@ -83,6 +83,8 @@ export type Database = {
           bio: string | null;
           /** 모임장. 남의 글 삭제와 회원 내보내기가 가능하다 */
           is_admin: boolean;
+          /** 첫 안내를 마친 시각. null이면 아직 안 봤다 */
+          onboarded_at: string | null;
           created_at: string;
         };
         Insert: Partial<Database['public']['Tables']['profiles']['Row']>;

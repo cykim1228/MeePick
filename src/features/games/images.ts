@@ -1,12 +1,21 @@
+import { nasUrl } from '@/lib/media';
 import { supabaseUrl } from '@/lib/supabase';
 
 import type { Game } from './types';
 
 const BUCKET = 'game-images';
 
-/** 저장소 객체 키 → 공개 URL. 기록 화면처럼 Game 객체 없이 경로만 있을 때 쓴다. */
+/**
+ * 저장소 객체 키 → 공개 URL. 기록 화면처럼 Game 객체 없이 경로만 있을 때 쓴다.
+ *
+ * 표지는 두 곳에 있다 — 노션에서 임포트한 것은 Supabase Storage에, 앱에서 올린 것은 NAS에.
+ * 게시글 사진과 같은 규칙(`nas/` 접두사)으로 가른다.
+ */
 export function storageImageUrl(path: string | null): string | null {
-  if (!path || !supabaseUrl) return null;
+  if (!path) return null;
+  const nas = nasUrl(path);
+  if (nas) return nas;
+  if (!supabaseUrl) return null;
   return `${supabaseUrl}/storage/v1/object/public/${BUCKET}/${encodeURIComponent(path)}`;
 }
 

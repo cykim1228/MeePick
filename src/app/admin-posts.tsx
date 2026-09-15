@@ -9,6 +9,7 @@ import { LoadingView } from '@/components/state-views';
 import { Radius, Spacing, TouchTarget } from '@/constants/theme';
 import { useFeed } from '@/features/community/hooks';
 import { postImageUrl } from '@/features/community/images';
+import { openPost } from '@/features/community/navigation';
 import { useConfirmOnce } from '@/hooks/use-confirm-once';
 import { useTheme } from '@/hooks/use-theme';
 import { useType } from '@/hooks/use-type';
@@ -34,7 +35,8 @@ export default function AdminPostsScreen() {
         {...confirm.bind}
         style={[styles.screen, { backgroundColor: c.background, paddingTop: insets.top }]}>
         <AdminHeader title="피드 관리" subtitle={`글 ${feed.posts.length}개`} />
-        <ScrollView contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + Spacing.six }]}>
+        <ScrollView
+          contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + Spacing.six }]}>
           {feed.error && <Text style={[t.caption, { color: c.danger }]}>{feed.error}</Text>}
           {feed.loading && <LoadingView />}
 
@@ -43,36 +45,53 @@ export default function AdminPostsScreen() {
             return (
               <View
                 key={p.id}
-                style={[styles.row, { backgroundColor: c.backgroundElement, borderColor: c.border }]}>
-                {cover ? (
-                  <Image
-                    source={{ uri: cover }}
-                    style={[styles.thumb, { backgroundColor: c.backgroundSelected }]}
-                    contentFit="cover"
-                    accessibilityIgnoresInvertColors
-                  />
-                ) : (
-                  <View style={[styles.thumb, styles.thumbEmpty, { backgroundColor: c.backgroundSelected }]}>
-                    <Icon name="message" size={18} color={c.textSecondary} />
-                  </View>
-                )}
+                style={[
+                  styles.row,
+                  { backgroundColor: c.backgroundElement, borderColor: c.border },
+                ]}>
+                {/* 누르면 그 글을 통째로 연다 — 한 줄 요약만 보고 지울지 정하기 어려울 때가 있다. */}
+                <Pressable
+                  onPress={() => openPost(p.id)}
+                  accessibilityRole="button"
+                  accessibilityLabel="글 열기"
+                  style={({ pressed }) => [styles.open, pressed && styles.pressed]}>
+                  {cover ? (
+                    <Image
+                      source={{ uri: cover }}
+                      style={[styles.thumb, { backgroundColor: c.backgroundSelected }]}
+                      contentFit="cover"
+                      accessibilityIgnoresInvertColors
+                    />
+                  ) : (
+                    <View
+                      style={[
+                        styles.thumb,
+                        styles.thumbEmpty,
+                        { backgroundColor: c.backgroundSelected },
+                      ]}>
+                      <Icon name="message" size={18} color={c.textSecondary} />
+                    </View>
+                  )}
 
-                <View style={styles.rowText}>
-                  <View style={styles.authorRow}>
-                    <Avatar profile={p.author} size={20} />
-                    <Text style={[t.caption, styles.author, { color: c.text }]} numberOfLines={1}>
-                      {p.author.displayName}
+                  <View style={styles.rowText}>
+                    <View style={styles.authorRow}>
+                      <Avatar profile={p.author} size={20} />
+                      <Text style={[t.caption, styles.author, { color: c.text }]} numberOfLines={1}>
+                        {p.author.displayName}
+                      </Text>
+                      <Text style={[t.caption, { color: c.textSecondary }]}>
+                        {timeAgo(p.createdAt)}
+                      </Text>
+                    </View>
+                    <Text style={[t.caption, { color: c.textSecondary }]} numberOfLines={2}>
+                      {p.body || '(사진만 있는 글)'}
                     </Text>
-                    <Text style={[t.caption, { color: c.textSecondary }]}>{timeAgo(p.createdAt)}</Text>
+                    <Text style={[t.caption, { color: c.textSecondary }]}>
+                      ♥ {p.likeCount} · 댓글 {p.commentCount}
+                      {p.imagePaths.length > 1 ? ` · 사진 ${p.imagePaths.length}장` : ''}
+                    </Text>
                   </View>
-                  <Text style={[t.caption, { color: c.textSecondary }]} numberOfLines={2}>
-                    {p.body || '(사진만 있는 글)'}
-                  </Text>
-                  <Text style={[t.caption, { color: c.textSecondary }]}>
-                    ♥ {p.likeCount} · 댓글 {p.commentCount}
-                    {p.imagePaths.length > 1 ? ` · 사진 ${p.imagePaths.length}장` : ''}
-                  </Text>
-                </View>
+                </Pressable>
 
                 <Pressable
                   onPress={() => confirm.press(p.id, () => void feed.remove(p.id))}
@@ -114,6 +133,8 @@ const styles = StyleSheet.create({
     borderRadius: Radius.md,
     borderWidth: StyleSheet.hairlineWidth,
   },
+  open: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
+  pressed: { opacity: 0.6 },
   thumb: { width: 52, height: 52, borderRadius: Radius.sm },
   thumbEmpty: { alignItems: 'center', justifyContent: 'center' },
   rowText: { flex: 1, gap: 2 },

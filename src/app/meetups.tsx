@@ -1,49 +1,109 @@
-import { router } from 'expo-router';
-import { useEffect, useState } from 'react';
-import { FlatList, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { router, usePathname } from 'expo-router';
+import { useEffect, useMemo, useState } from 'react';
+import { FlatList, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Avatar } from '@/components/avatar';
 import { DateTimeField, toDateValue, toTimeValue } from '@/components/date-time-picker';
+import { Fab } from '@/components/fab';
 import { Icon } from '@/components/icon';
+import { MeetupCalendar } from '@/components/meetup-calendar';
 import { MemberGate } from '@/components/member-gate';
+import { ScreenTitle } from '@/components/screen-title';
+import { SheetModal } from '@/components/sheet-modal';
 import { EmptyView, ErrorView, LoadingView } from '@/components/state-views';
 import { Radius, Shadow, Spacing, TouchTarget, Typography } from '@/constants/theme';
-import { markSeen, refreshActivity } from '@/features/community/activity';
-import { useMeetups, useMyProfile } from '@/features/community/hooks';
+import { refreshActivity, useMarkSeen } from '@/features/community/activity';
+import { useFeed, useMeetups, useMyProfile } from '@/features/community/hooks';
+import { playsOfMeetup, postsOfMeetup } from '@/features/community/meetup-plays';
+import { openMeetup, useOpenProfile } from '@/features/community/navigation';
 import type { MeetupInput } from '@/features/community/queries';
 import { RSVP_LABEL, type Meetup, type RsvpStatus } from '@/features/community/types';
-import { useSession } from '@/features/plays/hooks';
+import { usePlayHistory, useSession } from '@/features/plays/hooks';
 import { useMenuToggle } from '@/hooks/use-confirm-once';
 import { useTheme } from '@/hooks/use-theme';
-import { useType } from '@/hooks/use-type';
+import { useTouch } from '@/hooks/use-touch';
 import { appOrigin, copyText } from '@/lib/clipboard';
-import { dDay, formatMeetupTime, localDateOf, localToday } from '@/lib/dates';
+import {
+  dDay,
+  formatClock,
+  formatDayLabel,
+  formatMeetupTime,
+  localDateOf,
+  localToday,
+  monthOf,
+} from '@/lib/dates';
 
 const STATUSES: RsvpStatus[] = ['going', 'maybe', 'no'];
 
+/** 목록으로 볼지 달력으로 볼지. 고른 쪽을 기억한다. */
+type Mode = 'list' | 'calendar';
+const MODE_KEY = 'meepick.meetupView';
+
+/** 지난 모임 카드에 붙이는 요약 — 그날 몇 판 했고 글·사진이 몇 개 달렸나. */
+type Recap = { plays: number; posts: number; photos: number };
+
 export default function MeetupsScreen() {
   const c = useTheme();
-  const t = useType();
   const insets = useSafeAreaInsets();
   const { profile, loading: profileLoading, isMember } = useMyProfile();
   const list = useMeetups(isMember);
+  const feed = useFeed(isMember);
+  const { plays } = usePlayHistory();
   const session = useSession();
   const [composing, setComposing] = useState(false);
+  /** 달력의 빈 날에서 '이 날 일정 만들기'로 열면 그 날짜가 들어간다. */
+  const [composeDate, setComposeDate] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
 
   /**
-   * 이 화면을 열면 '봤다'고 적는다. 목록이 도착한 뒤에 적어야 —
-   * 화면을 여는 사이 올라온 글까지 읽은 것으로 넘어가지 않는다.
+   * 목록 / 달력.
+   *
+   * 목록은 "다음 모임이 뭐지"에, 달력은 "이번 달에 몇 번 모이지, 그 주말은 비었나"에 답한다.
+   * 달력으로 보는 사람은 매번 달력으로 보고 싶어 하므로 고른 쪽을 기기에 기억한다.
    */
+  const [mode, setMode] = useState<Mode>('list');
   useEffect(() => {
-    void refreshActivity().then(() => markSeen('meetups'));
-  }, [list.meetups.length]);
+    AsyncStorage.getItem(MODE_KEY)
+      .then((saved) => {
+        if (saved === 'list' || saved === 'calendar') setMode(saved);
+      })
+      .catch(() => undefined);
+  }, []);
+  const changeMode = (next: Mode) => {
+    setMode(next);
+    AsyncStorage.setItem(MODE_KEY, next).catch(() => undefined);
+  };
 
-  /**
-   * 일정에서 모임을 시작한다 — 참석(갈게요)한 사람을 그대로 오늘의 멤버로 앉히고
-   * 추천 화면으로 보낸다. 여기까지 오면 "누구랑 하지"를 다시 고를 이유가 없다.
-   */
+  const [month, setMonth] = useState(() => monthOf(localToday()));
+  const [selected, setSelected] = useState(() => localToday());
+  // 앞뒤 달의 흐린 날짜를 눌러도 그 달로 넘어간다 — 고른 날이 화면 밖에 있으면 안 된다.
+  const selectDay = (date: string) => {
+    setSelected(date);
+    if (monthOf(date) !== month) setMonth(monthOf(date));
+  };
+
+  const recaps = useMemo(() => {
+    const map = new Map<string, Recap>();
+    for (const m of list.meetups) {
+      if (!m.isPast) continue;
+      const posts = postsOfMeetup(m, feed.posts);
+      map.set(m.id, {
+        plays: playsOfMeetup(m, list.meetups, plays).length,
+        posts: posts.length,
+        photos: posts.reduce((n, p) => n + p.imagePaths.length, 0),
+      });
+    }
+    return map;
+  }, [list.meetups, plays, feed.posts]);
+
+  // 화면을 보고 있는 동안은 '봤다'로 유지한다 — 이유는 feed.tsx와 같다.
+  useMarkSeen('meetups', usePathname() === '/meetups');
+  useEffect(() => {
+    void refreshActivity();
+  }, []);
+
   /**
    * 참석자 중 **플레이 멤버 행이 연결된 사람**만 자동으로 들어올 수 있다.
    * 계정만 있고 아직 손님 기록과 이어지지 않은 사람은 여기서 빠지므로,
@@ -56,6 +116,10 @@ export default function MeetupsScreen() {
       .map((r) => session.members.find((m) => m.profileId === r.profile.id)?.id)
       .filter((id): id is string => Boolean(id));
 
+  /**
+   * 일정에서 모임을 시작한다 — 참석자를 그대로 오늘의 멤버로 앉히고 추천 화면으로 보낸다.
+   * 여기까지 오면 "누구랑 하지"를 다시 고를 이유가 없다.
+   */
   const startMeetup = (meetup: Meetup) => {
     // 아무도 못 들어와도 시작은 시킨다 — 일정 연결은 유지되고, 멤버는 다음 화면에서 고른다.
     if (session.startFromMeetup({ id: meetup.id, title: meetup.title }, startableIds(meetup)))
@@ -87,87 +151,154 @@ export default function MeetupsScreen() {
   }
 
   const upcoming = list.meetups.filter((m) => !m.isPast).length;
+  const dayMeetups = list.meetups
+    .filter((m) => localDateOf(m.startsAt) === selected)
+    .sort((a, b) => a.startsAt.localeCompare(b.startsAt));
+
+  const header = (
+    <View style={styles.header}>
+      <ScreenTitle
+        title="모임 일정"
+        subtitle={upcoming > 0 ? `예정된 모임 ${upcoming}개` : '예정된 모임이 없어요'}
+      />
+      <ModeToggle mode={mode} onChange={changeMode} />
+      {list.error && <Text style={[styles.caption, { color: c.danger }]}>{list.error}</Text>}
+    </View>
+  );
+
+  const openComposer = (date: string | null) => {
+    setComposeDate(date);
+    setComposing(true);
+  };
 
   return (
     <View style={[styles.screen, { backgroundColor: c.background, paddingTop: insets.top }]}>
-      <FlatList
-        data={list.meetups}
-        keyExtractor={(m) => m.id}
-        contentContainerStyle={[styles.list, { paddingBottom: insets.bottom + Spacing.six }]}
-        ListHeaderComponent={
-          <View style={styles.header}>
-            <View style={styles.headerRow}>
-              <View style={styles.headerText}>
-                <Text style={[styles.h1, t.display, { color: c.text }]}>모임 일정</Text>
+      {mode === 'calendar' ? (
+        <ScrollView
+          contentContainerStyle={[styles.list, { paddingBottom: insets.bottom + Spacing.six }]}>
+          {header}
+          <MeetupCalendar
+            meetups={list.meetups}
+            month={month}
+            selected={selected}
+            onMonthChange={setMonth}
+            onSelect={selectDay}
+          />
+
+          {/* 고른 날의 일정 — 칸 안에 다 넣으면 폰에서 읽히지 않아 아래에 따로 보여 준다. */}
+          <View style={styles.dayPanel}>
+            <Text style={[styles.dayLabel, { color: c.text }]}>{formatDayLabel(selected)}</Text>
+            {list.loading ? (
+              <LoadingView />
+            ) : dayMeetups.length === 0 ? (
+              <View style={styles.dayEmpty}>
                 <Text style={[styles.caption, { color: c.textSecondary }]}>
-                  {upcoming > 0 ? `예정된 모임 ${upcoming}개` : '예정된 모임이 없어요'}
+                  이날은 일정이 없어요.
                 </Text>
+                {/* 지난 날짜에 일정을 새로 잡을 일은 없다. */}
+                {selected >= localToday() && (
+                  <Pressable
+                    onPress={() => openComposer(selected)}
+                    accessibilityRole="button"
+                    style={({ pressed }) => [
+                      styles.dayCreate,
+                      { borderColor: c.accent },
+                      pressed && styles.pressed,
+                    ]}>
+                    <Icon name="plus" size={16} color={c.accent} />
+                    <Text style={[styles.caption, styles.bold, { color: c.accent }]}>
+                      이 날 일정 만들기
+                    </Text>
+                  </Pressable>
+                )}
               </View>
-              <Pressable
-                onPress={() => {
-                  setComposing((v) => !v);
-                  setEditingId(null);
-                }}
-                accessibilityRole="button"
-                style={[styles.newButton, { backgroundColor: c.accent }]}>
-                <Icon name={composing ? 'close' : 'plus'} size={18} color={c.onAccent} />
-                <Text style={[styles.newText, { color: c.onAccent }]}>
-                  {composing ? '닫기' : '일정'}
-                </Text>
-              </Pressable>
-            </View>
-            {composing && (
+            ) : (
+              dayMeetups.map((m) => (
+                <DayRow
+                  key={m.id}
+                  meetup={m}
+                  recap={recaps.get(m.id)}
+                  onPress={() => openMeetup(m.id)}
+                />
+              ))
+            )}
+          </View>
+        </ScrollView>
+      ) : (
+        <FlatList
+          data={list.meetups}
+          keyExtractor={(m) => m.id}
+          contentContainerStyle={[styles.list, { paddingBottom: insets.bottom + Spacing.six }]}
+          ListHeaderComponent={header}
+          renderItem={({ item }) =>
+            editingId === item.id ? (
               <MeetupComposer
+                initial={item}
                 pending={list.pending}
+                submitLabel="수정 저장"
+                onCancel={() => setEditingId(null)}
                 onSubmit={async (input) => {
-                  const ok = await list.create(input);
-                  if (ok) setComposing(false);
+                  const ok = await list.edit(item.id, input);
+                  if (ok) setEditingId(null);
                   return ok;
                 }}
               />
-            )}
-            {list.error && <Text style={[styles.caption, { color: c.danger }]}>{list.error}</Text>}
-          </View>
-        }
-        renderItem={({ item }) =>
-          editingId === item.id ? (
-            <MeetupComposer
-              initial={item}
-              pending={list.pending}
-              submitLabel="수정 저장"
-              onCancel={() => setEditingId(null)}
-              onSubmit={async (input) => {
-                const ok = await list.edit(item.id, input);
-                if (ok) setEditingId(null);
-                return ok;
-              }}
-            />
-          ) : (
-            <MeetupCard
-              meetup={item}
-              myId={profile.id}
-              isAdmin={profile.isAdmin}
-              activeMeetupId={session.meetup?.id ?? null}
-              blocked={session.activePlay !== null}
-              startCount={startableIds(item).length}
-              onStart={() => startMeetup(item)}
-              onRsvp={(s) => void list.rsvp(item.id, s)}
-              onEdit={() => {
-                setEditingId(item.id);
-                setComposing(false);
-              }}
-              onDelete={() => void list.remove(item.id)}
-            />
-          )
-        }
-        ListEmptyComponent={
-          list.loading ? (
-            <LoadingView />
-          ) : (
-            <EmptyView title="예정된 모임이 없어요" hint="'+ 일정'으로 다음 모임을 잡아보세요." />
-          )
-        }
+            ) : (
+              <MeetupCard
+                meetup={item}
+                myId={profile.id}
+                isAdmin={profile.isAdmin}
+                activeMeetupId={session.meetup?.id ?? null}
+                blocked={session.activePlay !== null}
+                startCount={startableIds(item).length}
+                recap={recaps.get(item.id)}
+                onOpen={() => openMeetup(item.id)}
+                onStart={() => startMeetup(item)}
+                onRsvp={(s) => void list.rsvp(item.id, s)}
+                onEdit={() => {
+                  setEditingId(item.id);
+                  setComposing(false);
+                }}
+                onDelete={() => void list.remove(item.id)}
+              />
+            )
+          }
+          ListEmptyComponent={
+            list.loading ? (
+              <LoadingView />
+            ) : (
+              <EmptyView
+                title="예정된 모임이 없어요"
+                hint="오른쪽 아래 ＋ 로 다음 모임을 잡아보세요."
+              />
+            )
+          }
+        />
+      )}
+
+      <Fab
+        icon="plus"
+        label="일정"
+        accessibilityLabel="일정 추가"
+        onPress={() => openComposer(null)}
       />
+
+      {/* 만들기는 창으로 띄운다 — 목록 맨 위에 펼치면 스크롤을 내린 상태에서는 보이지 않고,
+          펼친 만큼 아래 일정들이 밀려 내려간다. */}
+      <SheetModal visible={composing} onClose={() => setComposing(false)}>
+        <MeetupComposer
+          // 날짜를 바꿔 다시 열면 새로 시작한다 — 입력칸은 처음 값만 받는다.
+          key={composeDate ?? 'new'}
+          bare
+          initialDate={composeDate ?? undefined}
+          pending={list.pending}
+          onSubmit={async (input) => {
+            const ok = await list.create(input);
+            if (ok) setComposing(false);
+            return ok;
+          }}
+        />
+      </SheetModal>
     </View>
   );
 }
@@ -179,6 +310,8 @@ function MeetupCard({
   activeMeetupId,
   blocked,
   startCount,
+  recap,
+  onOpen,
   onStart,
   onRsvp,
   onEdit,
@@ -193,12 +326,17 @@ function MeetupCard({
   blocked: boolean;
   /** 참석자 중 실제로 오늘의 멤버가 될 수 있는 사람 수 */
   startCount: number;
+  /** 지난 모임의 요약. 다가오는 모임이면 없다 */
+  recap: Recap | undefined;
+  /** 모임 페이지로 */
+  onOpen: () => void;
   onStart: () => void;
   onRsvp: (s: RsvpStatus) => void;
   onEdit: () => void;
   onDelete: () => void;
 }) {
   const c = useTheme();
+  const openProfile = useOpenProfile();
   // 메뉴는 카드 안 다른 곳을 건드리면 닫힌다 — 열린 채 남으면 일정 내용을 가린다.
   const menu = useMenuToggle<'meetup'>();
   const past = meetup.isPast;
@@ -251,12 +389,23 @@ function MeetupCard({
         past && styles.pastCard,
       ]}>
       <View style={styles.cardHead}>
-        <View style={styles.cardHeadText}>
+        {/* 제목 쪽을 누르면 모임 페이지 — 참석자 전체, 그날 한 게임, 사진이 거기 모여 있다. */}
+        <Pressable
+          onPress={onOpen}
+          accessibilityRole="button"
+          accessibilityLabel={`${meetup.title} 모임 보기`}
+          style={({ pressed }) => [styles.cardHeadText, pressed && styles.pressed]}>
           <View style={styles.whenRow}>
             <View
               style={[
                 styles.dday,
-                { backgroundColor: past ? c.backgroundSelected : soon ? c.accent : c.badgeRecommended },
+                {
+                  backgroundColor: past
+                    ? c.backgroundSelected
+                    : soon
+                      ? c.accent
+                      : c.badgeRecommended,
+                },
               ]}>
               <Text style={[styles.ddayText, { color: past ? c.textSecondary : c.onAccent }]}>
                 {dDay(meetup.startsAt)}
@@ -266,11 +415,14 @@ function MeetupCard({
               {formatMeetupTime(meetup.startsAt)}
             </Text>
           </View>
-          <Text style={[styles.title, { color: c.text }]}>{meetup.title}</Text>
+          <View style={styles.titleRow}>
+            <Text style={[styles.title, styles.titleText, { color: c.text }]}>{meetup.title}</Text>
+            <Icon name="chevronRight" size={16} color={c.textSecondary} />
+          </View>
           {!!meetup.place && (
             <Text style={[styles.body, { color: c.textSecondary }]}>{meetup.place}</Text>
           )}
-        </View>
+        </Pressable>
         {/* 카드 흐름에 넣으면 일정 내용이 아래로 밀려, 누른 지점과 메뉴가 멀어진다. */}
         {mine && (
           <View style={styles.menuAnchor}>
@@ -318,8 +470,7 @@ function MeetupCard({
       <View style={styles.countRow}>
         <Text style={[styles.countText, { color: full ? c.accent : c.text }]}>
           참석 {going.length}
-          {meetup.capacity !== null ? `/${meetup.capacity}` : ''}명
-          {full ? ' · 정원 참' : ''}
+          {meetup.capacity !== null ? `/${meetup.capacity}` : ''}명{full ? ' · 정원 참' : ''}
         </Text>
         {maybe.length > 0 && (
           <Text style={[styles.caption, { color: c.textSecondary }]}>미정 {maybe.length}</Text>
@@ -342,14 +493,37 @@ function MeetupCard({
       {going.length > 0 && (
         <View style={styles.attendees}>
           {going.slice(0, 10).map((r) => (
-            <View key={r.profile.id} style={styles.attendee}>
+            <Pressable
+              key={r.profile.id}
+              onPress={() => openProfile(r.profile.id)}
+              accessibilityRole="button"
+              accessibilityLabel={`${r.profile.displayName} 프로필`}
+              style={styles.attendee}>
               <Avatar profile={r.profile} size={28} />
               <Text style={[styles.attendeeName, { color: c.textSecondary }]} numberOfLines={1}>
                 {r.profile.displayName}
               </Text>
-            </View>
+            </Pressable>
           ))}
         </View>
+      )}
+
+      {/* 지난 모임은 "그날 뭐 했더라"로 이어 준다. */}
+      {past && (
+        <Pressable
+          onPress={onOpen}
+          accessibilityRole="button"
+          style={({ pressed }) => [
+            styles.recapLink,
+            { borderTopColor: c.border },
+            pressed && styles.pressed,
+          ]}>
+          <Icon name="dice" size={16} color={c.textSecondary} />
+          <Text style={[styles.caption, styles.recapText, { color: c.text }]} numberOfLines={1}>
+            {recapLine(recap)}
+          </Text>
+          <Text style={[styles.caption, styles.bold, { color: c.accent }]}>모임 기록 ›</Text>
+        </Pressable>
       )}
 
       {/* 모임 시작 — 참석자를 그대로 오늘의 멤버로 앉히고 추천 화면으로 간다.
@@ -365,11 +539,7 @@ function MeetupCard({
               ? { borderColor: c.border, borderWidth: 1 }
               : { backgroundColor: c.accent },
           ]}>
-          <Icon
-            name="dice"
-            size={18}
-            color={running || blocked ? c.textSecondary : c.onAccent}
-          />
+          <Icon name="dice" size={18} color={running || blocked ? c.textSecondary : c.onAccent} />
           <Text
             style={[
               styles.startText,
@@ -426,24 +596,125 @@ function MeetupCard({
  * 웹의 datetime-local은 RN TextInput으로 못 쓰고, 한 칸에 몰아 받으면 형식 실수가 잦다.
  * 만들기와 수정이 같은 폼을 쓴다(initial 유무로 갈린다).
  */
+/** '이날 3판 · 사진 2장' — 남은 게 없으면 그렇다고 말한다. */
+function recapLine(recap: Recap | undefined): string {
+  if (!recap) return '모임 기록';
+  const parts = [
+    recap.plays > 0 ? `이날 ${recap.plays}판` : null,
+    recap.photos > 0 ? `사진 ${recap.photos}장` : recap.posts > 0 ? `글 ${recap.posts}개` : null,
+  ].filter(Boolean);
+  return parts.length ? parts.join(' · ') : '남은 판·사진이 없어요';
+}
+
+/** 목록 ↔ 달력 전환. 둘 중 하나만 켜지는 버튼 한 쌍이다. */
+function ModeToggle({ mode, onChange }: { mode: Mode; onChange: (mode: Mode) => void }) {
+  const c = useTheme();
+  const items: { key: Mode; label: string; icon: 'list' | 'calendar' }[] = [
+    { key: 'list', label: '목록', icon: 'list' },
+    { key: 'calendar', label: '달력', icon: 'calendar' },
+  ];
+  return (
+    <View style={[styles.toggle, { borderColor: c.border, backgroundColor: c.backgroundElement }]}>
+      {items.map((item) => {
+        const on = mode === item.key;
+        return (
+          <Pressable
+            key={item.key}
+            onPress={() => onChange(item.key)}
+            accessibilityRole="button"
+            accessibilityState={{ selected: on }}
+            style={[styles.toggleItem, on && { backgroundColor: c.accent }]}>
+            <Icon name={item.icon} size={16} color={on ? c.onAccent : c.textSecondary} />
+            <Text
+              style={[styles.caption, styles.bold, { color: on ? c.onAccent : c.textSecondary }]}>
+              {item.label}
+            </Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
+
+/** 달력에서 고른 날의 일정 한 줄. 누르면 모임 페이지. */
+function DayRow({
+  meetup,
+  recap,
+  onPress,
+}: {
+  meetup: Meetup;
+  recap: Recap | undefined;
+  onPress: () => void;
+}) {
+  const c = useTheme();
+  const going = meetup.rsvps.filter((r) => r.status === 'going').length;
+  const details = [
+    meetup.place,
+    `참석 ${going}명`,
+    meetup.isPast && recap && recap.plays > 0 ? `${recap.plays}판` : null,
+    meetup.isPast && recap && recap.photos > 0 ? `사진 ${recap.photos}장` : null,
+  ].filter(Boolean);
+
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`${meetup.title} 모임 보기`}
+      style={({ pressed }) => [
+        styles.dayRow,
+        {
+          backgroundColor: c.backgroundElement,
+          borderColor: meetup.isPast ? c.border : c.accent,
+        },
+        pressed && styles.pressed,
+      ]}>
+      <Text
+        style={[
+          styles.caption,
+          styles.bold,
+          styles.dayTime,
+          { color: meetup.isPast ? c.textSecondary : c.accent },
+        ]}>
+        {formatClock(meetup.startsAt)}
+      </Text>
+      <View style={styles.dayText}>
+        <Text style={[styles.body, styles.bold, { color: c.text }]} numberOfLines={1}>
+          {meetup.title}
+        </Text>
+        <Text style={[styles.caption, { color: c.textSecondary }]} numberOfLines={1}>
+          {details.join(' · ')}
+        </Text>
+      </View>
+      <Icon name="chevronRight" size={16} color={c.textSecondary} />
+    </Pressable>
+  );
+}
+
 function MeetupComposer({
   initial,
+  initialDate,
   pending,
   submitLabel = '일정 만들기',
+  /** 팝업 안에서는 카드 테두리를 벗긴다 — 팝업이 이미 카드라 액자 안의 액자가 된다. */
+  bare = false,
   onSubmit,
   onCancel,
 }: {
   initial?: Meetup;
+  /** 새로 만들 때 채워 둘 날짜(YYYY-MM-DD). 달력에서 날짜를 골라 열 때 쓴다 */
+  initialDate?: string;
   pending: boolean;
   submitLabel?: string;
+  bare?: boolean;
   onSubmit: (input: MeetupInput) => Promise<boolean>;
   onCancel?: () => void;
 }) {
   const c = useTheme();
+  const touch = useTouch();
   const at = initial ? new Date(initial.startsAt) : null;
 
   const [title, setTitle] = useState(initial?.title ?? '');
-  const [date, setDate] = useState(at ? toDateValue(at) : localToday());
+  const [date, setDate] = useState(at ? toDateValue(at) : (initialDate ?? localToday()));
   const [time, setTime] = useState(at ? toTimeValue(at) : '19:00');
   const [place, setPlace] = useState(initial?.place ?? '');
   const [capacity, setCapacity] = useState(initial?.capacity ? String(initial.capacity) : '');
@@ -483,7 +754,13 @@ function MeetupComposer({
   const field = { color: c.text, backgroundColor: c.backgroundElement, borderColor: c.border };
 
   return (
-    <View style={[styles.card, { backgroundColor: c.background, borderColor: c.accent, borderWidth: 1 }]}>
+    <View
+      style={[
+        styles.card,
+        bare
+          ? styles.bareCard
+          : { backgroundColor: c.background, borderColor: c.accent, borderWidth: 1 },
+      ]}>
       <TextInput
         value={title}
         onChangeText={setTitle}
@@ -491,11 +768,12 @@ function MeetupComposer({
         placeholderTextColor={c.textSecondary}
         style={[styles.input, field]}
       />
+      {/* 날짜가 시간보다 길다("8월 26일 (수)" 대 "오후 7:00"). 반씩 나누면 날짜만 잘린다. */}
       <View style={styles.inputRow}>
-        <View style={styles.flex}>
+        <View style={styles.dateField}>
           <DateTimeField mode="date" label="날짜" value={date} onChange={setDate} />
         </View>
-        <View style={styles.flex}>
+        <View style={styles.timeField}>
           <DateTimeField mode="time" label="시간" value={time} onChange={setTime} />
         </View>
       </View>
@@ -535,7 +813,11 @@ function MeetupComposer({
           accessibilityRole="button"
           style={[
             styles.submit,
-            { backgroundColor: c.accent, opacity: pending || !title.trim() ? 0.4 : 1 },
+            {
+              minHeight: touch.primary,
+              backgroundColor: c.accent,
+              opacity: pending || !title.trim() ? 0.4 : 1,
+            },
           ]}>
           <Text style={[styles.newText, { color: c.onAccent }]}>{submitLabel}</Text>
         </Pressable>
@@ -555,9 +837,61 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
   },
   header: { gap: Spacing.three },
-  headerRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.three },
-  headerText: { flex: 1, gap: Spacing.one },
   h1: { ...Typography.display },
+  bold: { fontWeight: '700' },
+  pressed: { opacity: 0.65 },
+  toggle: {
+    flexDirection: 'row',
+    alignSelf: 'flex-start',
+    borderWidth: 1,
+    borderRadius: Radius.full,
+    padding: 3,
+    gap: 2,
+  },
+  toggleItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.one,
+    minHeight: 34,
+    paddingHorizontal: Spacing.three,
+    borderRadius: Radius.full,
+  },
+  dayPanel: { gap: Spacing.two },
+  dayLabel: { ...Typography.subtitle },
+  dayEmpty: { gap: Spacing.two, alignItems: 'flex-start' },
+  dayCreate: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.one,
+    minHeight: TouchTarget.min,
+    paddingHorizontal: Spacing.three,
+    borderRadius: Radius.full,
+    borderWidth: 1,
+  },
+  dayRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.three,
+    minHeight: TouchTarget.primary,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+  },
+  dayTime: { minWidth: 64 },
+  dayText: { flex: 1, minWidth: 0, gap: 2 },
+  titleRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.one },
+  titleText: { flexShrink: 1 },
+  recapLink: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    minHeight: TouchTarget.min,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    marginTop: Spacing.one,
+    paddingTop: Spacing.one,
+  },
+  recapText: { flex: 1, minWidth: 0, fontWeight: '600' },
   newButton: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -648,8 +982,16 @@ const styles = StyleSheet.create({
   // 입력칸은 내용 폭이 넓어서, 이게 없으면 좁은 화면에서 옆 칸을 줄 밖으로 밀어낸다.
   flex: { flex: 1, minWidth: 0 },
   capInput: { width: 84, flexGrow: 0, flexShrink: 0 },
+  dateField: { flex: 1.35, minWidth: 0 },
+  timeField: { flex: 1, minWidth: 0 },
+  // 팝업 안에서는 배경도 테두리도 팝업 것을 쓴다.
+  bareCard: { padding: 0, borderWidth: 0, backgroundColor: 'transparent' },
   composerActions: { flexDirection: 'row', alignItems: 'center', gap: Spacing.three },
-  cancelButton: { minHeight: TouchTarget.primary, justifyContent: 'center', paddingHorizontal: Spacing.two },
+  cancelButton: {
+    minHeight: TouchTarget.primary,
+    justifyContent: 'center',
+    paddingHorizontal: Spacing.two,
+  },
   submit: {
     flex: 1,
     minHeight: TouchTarget.primary,

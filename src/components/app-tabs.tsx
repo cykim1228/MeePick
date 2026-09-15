@@ -29,7 +29,7 @@ export default function AppTabs() {
       </NativeTabs.Trigger>
 
       <NativeTabs.Trigger name="index">
-        <NativeTabs.Trigger.Label>추천</NativeTabs.Trigger.Label>
+        <NativeTabs.Trigger.Label>게임</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon
           src={require('@/assets/images/tabIcons/home.png')}
           renderingMode="template"
@@ -37,7 +37,7 @@ export default function AppTabs() {
       </NativeTabs.Trigger>
 
       <NativeTabs.Trigger name="explore">
-        <NativeTabs.Trigger.Label>전체</NativeTabs.Trigger.Label>
+        <NativeTabs.Trigger.Label>목록</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon
           src={require('@/assets/images/tabIcons/explore.png')}
           renderingMode="template"
